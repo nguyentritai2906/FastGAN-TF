@@ -14,12 +14,12 @@ def DiffAugment(x, policy=''):
 
 
 def rand_brightness(x):
-    x = x + tf.random.uniform((x.shape[0], 1, 1, 1), dtype=x.dtype) - 0.5
+    x = x + (tf.random.uniform((x.shape[0], 1, 1, 1), dtype=x.dtype) - 0.5)
     return x
 
 
 def rand_saturation(x):
-    x_mean = tf.reduce_mean(x, axis=1, keepdims=True)
+    x_mean = tf.reduce_mean(x, axis=-1, keepdims=True)
     x = (x - x_mean) * (tf.random.uniform(
         (x.shape[0], 1, 1, 1), dtype=x.dtype) * 2) + x_mean
     return x
