@@ -9,45 +9,32 @@ from operation import crop_image_by_part
 # def conv2d(*args, **kwargs):
 #     return SpectralNormalization(
 #         layers.Conv2D(*args,
-#                       **kwargs))
+#                       **kwargs,
+#                       kernel_initializer=tf.keras.initializers.RandomNormal(
+#                           0.0, 0.02)))
 
-
-def conv2d(*args, **kwargs):
-    return SpectralNormalization(
-        layers.Conv2D(*args,
-                      **kwargs,
-                      kernel_initializer=tf.keras.initializers.RandomNormal(
-                          0.0, 0.02)))
-
-
-def convTranspose2d(*args, **kwargs):
-    return SpectralNormalization(
-        layers.Conv2DTranspose(
-            *args,
-            **kwargs,
-            kernel_initializer=tf.keras.initializers.RandomNormal(0.0, 0.02)))
-
+# def convTranspose2d(*args, **kwargs):
+#     return SpectralNormalization(layers.Conv2DTranspose(*args,
+#             **kwargs,
+#             kernel_initializer=tf.keras.initializers.RandomNormal( 0.0, 0.02)))
 
 # def batchNorm2d(*args, **kwargs):
 #     return layers.BatchNormalization(
 #         *args,
-#         **kwargs)
+#         **kwargs,
+#         gamma_initializer=tf.keras.initializers.RandomNormal(1.0, 0.02))
+
+
+def conv2d(*args, **kwargs):
+    return SpectralNormalization(layers.Conv2D(*args, **kwargs))
 
 
 def batchNorm2d(*args, **kwargs):
-    return layers.BatchNormalization(
-        *args,
-        **kwargs,
-        gamma_initializer=tf.keras.initializers.RandomNormal(1.0, 0.02))
+    return layers.BatchNormalization(*args, **kwargs)
 
 
-# def linear(*args, **kwargs):
-#     return SpectralNormalization(layers.Dense(*args, **kwargs))
-
-# class PixelNorm(layers.Layer):
-#     def call(self, input):
-#         return input * tf.math.rsqrt(
-#             tf.reduce_mean(input**2, axis=-1, keepdims=True) + 1e-8)
+def convTranspose2d(*args, **kwargs):
+    return SpectralNormalization(layers.Conv2DTranspose(*args, **kwargs))
 
 
 def GLU(x):
@@ -67,13 +54,21 @@ class NoiseInjection(layers.Layer):
     def call(self, feat, noise=None):
         if noise is None:
             _, height, width, _ = feat.shape
-            noise = tf.random.normal((height, width, 1), dtype='float32')
+            noise = tf.random.normal((height, width, 1), dtype='float16')
 
-        return feat + self.weight * noise
+        return feat + tf.cast(self.weight, 'float16') * noise
 
 
 def Swish(feat):
     return feat * tf.math.sigmoid(feat)
+
+
+def InitLayer(noise, channel):
+    noise = layers.Reshape((1, 1, -1))(noise)
+    noise = convTranspose2d(channel * 2, 4, 1, use_bias=False)(noise)
+    noise = batchNorm2d()(noise)
+    noise = GLU(noise)
+    return noise
 
 
 def SEBlock(feat_small, feat_big, ch_out):
@@ -83,14 +78,6 @@ def SEBlock(feat_small, feat_big, ch_out):
     feat_small = conv2d(ch_out, 1, 1, use_bias=False)(feat_small)
     feat_small = layers.Activation('sigmoid')(feat_small)
     return feat_big * feat_small
-
-
-def InitLayer(noise, channel):
-    noise = layers.Reshape((1, 1, -1))(noise)
-    noise = convTranspose2d(channel * 2, 4, 1, use_bias=False)(noise)
-    noise = batchNorm2d()(noise)
-    noise = GLU(noise)
-    return noise
 
 
 def UpBlock(x, out_planes):
