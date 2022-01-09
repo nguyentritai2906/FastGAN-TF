@@ -76,10 +76,11 @@ class ProgressBar(object):
         percentage = self.completed / float(self.task_num)
         mark_width = int(self.bar_width * percentage)
         bar_chars = '>' * mark_width + ' ' * (self.bar_width - mark_width)
-        stdout_str = '\rTraining [{}] {}/{}, {}  {:.1f} step/sec'
+        stdout_str = '\rTraining [{}] {}/{}, {}  {:.1f} step/sec  ETA {:.1f} hrs'
         sys.stdout.write(
-            stdout_str.format(bar_chars, self.completed, self.task_num,
-                              inf_str, self.fps))
+            stdout_str.format(
+                bar_chars, self.completed, self.task_num, inf_str, self.fps,
+                (self.task_num - self.completed) / self.fps / 3600))
 
         sys.stdout.flush()
 
