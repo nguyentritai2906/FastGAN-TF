@@ -47,6 +47,7 @@ def glu(x):
 
 
 class NoiseInjection(layers.Layer):
+
     def __init__(self, **kwargs):
         super(NoiseInjection, self).__init__(**kwargs)
 
@@ -65,6 +66,7 @@ class NoiseInjection(layers.Layer):
 
 
 class SubpixelConv2D(Conv2D):
+
     def __init__(self,
                  upsampling_factor,
                  filters,
