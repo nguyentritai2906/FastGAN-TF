@@ -447,7 +447,7 @@ class GLU(layers.Layer):
             -1] % 2 == 0, 'Last dimension of input shape must be even.'
 
     def call(self, inputs):
-        nc = (tf.shape(inputs)[-1] / 2)
+        nc = int(tf.shape(inputs)[-1] / 2)
         return inputs[:, :, :, :nc] * tf.math.sigmoid(inputs[:, :, :, nc:])
 
 
