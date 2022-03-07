@@ -262,7 +262,7 @@ class LayerEpilogue(layers.Layer):
         self.activation = layers.LeakyReLU(alpha=0.2)
 
     def call(self, x, w):
-        x = self.inject_noise(x)
+        # x = self.inject_noise(x)
         x = self.adain(x, w)
         x = self.activation(x)
         return x
