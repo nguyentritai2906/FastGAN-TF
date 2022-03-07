@@ -508,7 +508,8 @@ class UpBlock(layers.Layer):
 
         self.upsample = layers.UpSampling2D()
         self.block = tf.keras.Sequential([
-            layers.Conv2D(out_planes * 2, 3, 1, 'same', use_bias=False),
+            SpectralNormalization(
+                layers.Conv2D(out_planes * 2, 3, 1, 'same', use_bias=False)),
             layers.BatchNormalization(),
             GLU(),
         ])
@@ -529,19 +530,21 @@ class UpBlockComp(layers.Layer):
         self.out_planes = out_planes
 
         self.upsample = layers.UpSampling2D()
+
         self.block_1 = tf.keras.Sequential([
             SpectralNormalization(
                 layers.Conv2D(out_planes * 2, 3, 1, 'same', use_bias=False)),
             layers.BatchNormalization(),
             GLU(),
         ])
+        self.epilogue_1 = LayerEpilogue()
+
         self.block_2 = tf.keras.Sequential([
             SpectralNormalization(
                 layers.Conv2D(out_planes * 2, 3, 1, 'same', use_bias=False)),
             layers.BatchNormalization(),
             GLU(),
         ])
-        self.epilogue_1 = LayerEpilogue()
         self.epilogue_2 = LayerEpilogue()
 
     def call(self, x, w=None):

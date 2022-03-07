@@ -330,7 +330,7 @@ def main(args):
                 tf.cast(err_g, 'float32')))
 
         for i, (w, avg_w) in enumerate(zip(modelG.get_weights(), avg_param_G)):
-            avg_param_G[i] = avg_w * 0.998 + 0.002 * w
+            avg_param_G[i] = avg_w * 0.999 + 0.001 * w
 
         ## Save image
         if cur_step % 1000 == 0:
