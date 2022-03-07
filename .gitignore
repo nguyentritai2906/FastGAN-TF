@@ -3,7 +3,7 @@
 __pycache__/
 backup_results/
 datasets/
-*-256.tfrecords
+*.tfrecords
 *.h5
 logs-old/
 logs/
