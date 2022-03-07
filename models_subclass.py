@@ -344,8 +344,8 @@ class PerPixelNoiseInjection(layers.Layer):
         super(PerPixelNoiseInjection, self).__init__(**kwargs)
 
     def build(self, input_shape):
-        w_init = tf.zeros(shape=(1, 1, 1, input_shape[-1]),
-                          dtype=tf.dtypes.float32)
+        w_init = tf.random.normal(shape=(1, 1, 1, input_shape[-1]),
+                                  dtype=tf.dtypes.float32)
         self.w = tf.Variable(w_init, trainable=True, name='w')
 
     def call(self, inputs, noise=None):
@@ -434,7 +434,7 @@ class Swish(layers.Layer):
         super(Swish, self).__init__(**kwargs)
 
     def call(self, x):
-        return x * tf.nn.sigmoid(x)
+        return x * tf.math.sigmoid(x)
 
 
 class GLU(layers.Layer):
@@ -447,8 +447,8 @@ class GLU(layers.Layer):
             -1] % 2 == 0, 'Last dimension of input shape must be even.'
 
     def call(self, inputs):
-        return inputs[:, :, :, :inputs.shape[-1] // 2] * tf.math.sigmoid(
-            inputs[:, :, :, inputs.shape[-1] // 2:])
+        nc = (tf.shape(inputs)[-1] / 2)
+        return inputs[:, :, :, :nc] * tf.math.sigmoid(inputs[:, :, :, nc:])
 
 
 class InitLayer(layers.Layer):
@@ -484,18 +484,10 @@ class SEBlock(layers.Layer):
         self.block = tf.keras.Sequential([
             tfa.layers.AdaptiveAveragePooling2D(4),
             SpectralNormalization(
-                layers.Conv2D(channel_out,
-                              4,
-                              1,
-                              padding='valid',
-                              use_bias=False)),
+                layers.Conv2D(channel_out, 4, 1, use_bias=False)),
             Swish(),
             SpectralNormalization(
-                layers.Conv2D(channel_out,
-                              1,
-                              1,
-                              padding='valid',
-                              use_bias=False)),
+                layers.Conv2D(channel_out, 1, 1, use_bias=False)),
             layers.Activation('sigmoid')
         ])
 
@@ -605,7 +597,7 @@ class DownBlockComp(layers.Layer):
         self.direct_path = tf.keras.Sequential([
             layers.AveragePooling2D(2, 2),
             SpectralNormalization(
-                layers.Conv2D(out_planes, 1, 1, 'valid', use_bias=False)),
+                layers.Conv2D(out_planes, 1, 1, use_bias=False)),
             layers.BatchNormalization(),
             layers.LeakyReLU(0.2),
         ])

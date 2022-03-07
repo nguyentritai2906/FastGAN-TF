@@ -77,7 +77,7 @@ def main(args):
     LR = args.lr
 
     NDF = 64
-    NGF = 64
+    NGF = 128
     NZ = 256
     N_CRITIC_ITER = 1
     N_GENERATOR_ITER = 1
@@ -185,8 +185,7 @@ def main(args):
             norm = tf.sqrt(tf.reduce_sum(grads**2, axis=[1, 2, 3]))
             gp = tf.reduce_mean((norm - 1.0)**2)
 
-            err = (mean_df - mean_dr +
-                   C_LAMBDA * tf.cast(gp, tf.float16)) * BATCH_SCALER
+            err = mean_df - mean_dr + C_LAMBDA * tf.cast(gp, tf.float16)
 
             scaled_err = optimizerD.get_scaled_loss(err)
         scaled_gradients = d_tape.gradient(scaled_err,
@@ -218,7 +217,7 @@ def main(args):
 
             pred_g = modelD(fake_images, training=True)
             mean_g = tf.reduce_mean(pred_g)
-            err_g = -mean_g * BATCH_SCALER
+            err_g = -mean_g
 
             scaled_err = optimizerG.get_scaled_loss(err_g)
         scaled_gradients = g_tape.gradient(scaled_err,
