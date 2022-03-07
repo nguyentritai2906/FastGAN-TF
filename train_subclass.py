@@ -78,7 +78,7 @@ def main(args):
 
     NDF = 64
     NGF = 64
-    NZ = 512
+    NZ = 256
     N_CRITIC_ITER = 1
     N_GENERATOR_ITER = 1
     N_BALANCE_ITER = 2
@@ -298,24 +298,24 @@ def main(args):
             tf.summary.scalar('Loss/Loss', loss_d, step=cur_step)
             tf.summary.scalar('Pred/Pred_D', err_dr, step=cur_step)
 
-            for i, layer in enumerate(modelG.layers):
+            # for i, layer in enumerate(modelG.layers):
 
-                if 'mapping' == layer.name:
-                    for l in layer.dense_layers:
-                        tf.summary.histogram(
-                            f'Mapping/{layer.name}/{l.name}/weight',
-                            l.w,
-                            step=cur_step)
-                    for l in layer.bias_act_layers:
-                        tf.summary.histogram(
-                            f'Mapping/{layer.name}/{l.name}/bias',
-                            l.b,
-                            step=cur_step)
+            #     if 'mapping' == layer.name:
+            #         for l in layer.dense_layers:
+            #             tf.summary.histogram(
+            #                 f'Mapping/{layer.name}/{l.name}/weight',
+            #                 l.w,
+            #                 step=cur_step)
+            #         for l in layer.bias_act_layers:
+            #             tf.summary.histogram(
+            #                 f'Mapping/{layer.name}/{l.name}/bias',
+            #                 l.b,
+            #                 step=cur_step)
 
-                if 'const_layer' == layer.name:
-                    tf.summary.histogram(f'Init/{layer.name}/const',
-                                         layer.const,
-                                         step=cur_step)
+            #     if 'const_layer' == layer.name:
+            #         tf.summary.histogram(f'Init/{layer.name}/const',
+            #                              layer.const,
+            #                              step=cur_step)
 
             # for g, v in zip(gradientsG, modelG.layers):
             #     tf.summary.histogram("GradientG/{}/grad_histogram".format(v.name), g, step=cur_step)

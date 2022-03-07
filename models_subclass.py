@@ -155,7 +155,7 @@ class Mapping(layers.Layer):
                         act='lrelu',
                         name='bias_{:d}'.format(ii)))
 
-    def call(self, inputs, training=None, mask=None):
+    def call(self, inputs):
         latents = inputs
         x = latents
 
@@ -191,12 +191,11 @@ class AdaIN(layers.Layer):
     def build(self, input_shape):
         self.instance_norm = InstanceNormalization(-1)
 
-        # self.style_scale_transform = layers.Dense(channels)
-        # self.style_shift_transform = layers.Dense(channels)
         self.style_scale_transform_dense = Dense(self.channels,
                                                  gain=np.sqrt(2),
                                                  lrmul=0.01)
         self.style_scale_transform_bias = BiasAct(lrmul=0.01, act='linear')
+
         self.style_shift_transform_dense = Dense(self.channels,
                                                  gain=np.sqrt(2),
                                                  lrmul=0.01)
@@ -204,8 +203,6 @@ class AdaIN(layers.Layer):
 
     def call(self, x, w):
         normalized_x = self.instance_norm(x)
-        # style_scale = self.style_scale_transform(w)[:, None, None, :]
-        # style_shift = self.style_shift_transform(w)[:, None, None, :]
         style_scale = self.style_scale_transform_dense(w)
         style_scale = self.style_scale_transform_bias(style_scale)[:, None,
                                                                    None, :]
@@ -278,11 +275,9 @@ class StyleModulation(layers.Layer):
     def build(self, input_shape):
         self.dense = Dense(input_shape[-1] * 2)
         self.bias_act = BiasAct(lrmul=0.01, act='lrelu')
-        # self.dense = dense(input_shape[-1] * 2)
 
     def call(self, x, latten):
         style = self.bias_act(self.dense(latten))
-        # style = self.dense(latten)
         style = tf.reshape(style,
                            [-1, 2] + [1] * (len(x.shape) - 2) + [x.shape[-1]])
         return x * (style[:, 0] + 1) + style[:, 1]
@@ -349,8 +344,6 @@ class PerPixelNoiseInjection(layers.Layer):
         super(PerPixelNoiseInjection, self).__init__(**kwargs)
 
     def build(self, input_shape):
-        # w_init = tf.random.normal(shape=(1, 1, 1, input_shape[-1]),
-        #                           dtype=tf.dtypes.float32)
         w_init = tf.zeros(shape=(1, 1, 1, input_shape[-1]),
                           dtype=tf.dtypes.float32)
         self.w = tf.Variable(w_init, trainable=True, name='w')
@@ -785,8 +778,9 @@ class Generator(Model):
         for k, v in self.nfc_multi.items():
             self.nfc[k] = int(v * ngf)
 
-        self.mapping = Mapping(8)
-        self.const = ConstLayer(256)
+    def build(self, input_shape):
+        self.mapping = Mapping(8, input_shape[-1])
+        self.const = ConstLayer(input_shape[-1])
 
         self.feat_8 = UpBlockComp(self.nfc[8])
         self.feat_16 = UpBlock(self.nfc[16])
@@ -795,10 +789,10 @@ class Generator(Model):
         self.feat_128 = UpBlockComp(self.nfc[128])
         self.feat_256 = UpBlock(self.nfc[256])
 
-        if im_size == 512:
+        if self.im_size == 512:
             self.feat_512 = UpBlockComp(self.nfc[512])
             self.se_block_512 = SEBlock(self.nfc[512])
-        elif im_size == 1024:
+        elif self.im_size == 1024:
             self.feat_512 = UpBlockComp(self.nfc[512])
             self.se_block_512 = SEBlock(self.nfc[512])
             self.feat_1024 = UpBlock(self.nfc[1024])
@@ -808,7 +802,7 @@ class Generator(Model):
         self.se_block_256 = SEBlock(self.nfc[256])
 
         self.to_big = SpectralNormalization(
-            layers.Conv2D(nc, 3, 1, 'same', use_bias=False))
+            layers.Conv2D(self.nc, 3, 1, 'same', use_bias=False))
         self.act = layers.Activation('tanh')
 
     def call(self, inputs):
