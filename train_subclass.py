@@ -98,7 +98,7 @@ def main(args):
     ## Model
     strategy = tf.distribute.MirroredStrategy(devices=None)
     with strategy.scope():
-        modelG = Generator(ngf=NGF, im_size=IM_SIZE)
+        modelG = Generator(w_dim=NZ, ngf=NGF, im_size=IM_SIZE)
         modelG(tf.random.normal([1, NZ]))
         modelD = Discriminator(ndf=NDF, im_size=IM_SIZE)
         modelD(tf.random.normal([1, IM_SIZE, IM_SIZE, 3]))
@@ -383,7 +383,7 @@ def main(args):
             backup_para = modelG.get_weights()
             modelG.set_weights(avg_param_G)
             manager.save()
-            modelG.save(os.path.join(MODEL_FOLDER, args.name + '.h5'))
+            tf.saved_model.save(modelG, MODEL_FOLDER + '/saved_model')
             modelG.set_weights(backup_para)
 
 
