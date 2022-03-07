@@ -99,9 +99,9 @@ def main(args):
     strategy = tf.distribute.MirroredStrategy(devices=None)
     with strategy.scope():
         modelG = Generator(ngf=NGF, im_size=IM_SIZE)
-        modelG.build(input_shape=(None, NZ))
+        modelG(tf.random.normal([1, NZ]))
         modelD = Discriminator(ndf=NDF, im_size=IM_SIZE)
-        modelD.build(input_shape=(None, IM_SIZE, IM_SIZE, 3))
+        modelD(tf.random.normal([1, IM_SIZE, IM_SIZE, 3]))
         optimizerG = mixed_precision.LossScaleOptimizer(optimizers.RMSprop(LR))
         optimizerD = mixed_precision.LossScaleOptimizer(optimizers.RMSprop(LR))
         # lpips = tf.keras.models.load_model(LPIPS_PATH)
