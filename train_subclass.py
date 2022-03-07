@@ -77,7 +77,7 @@ def main(args):
     LR = args.lr
 
     D_FACTOR = 64
-    G_FACTOR = 128
+    G_FACTOR = 64
     W_DIM = 256
     N_CRITIC_ITER = 1
     N_GENERATOR_ITER = 1

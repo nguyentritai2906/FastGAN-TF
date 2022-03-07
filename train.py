@@ -76,7 +76,7 @@ def main(args):
     LR = args.lr
 
     NDF = 64
-    NGF = 128
+    NGF = 64
     NZ = 256
     N_CRITIC_ITER = 1
     N_GENERATOR_ITER = 1
