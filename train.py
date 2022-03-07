@@ -297,46 +297,46 @@ def main(args):
             tf.summary.scalar('Loss/Loss', loss_d, step=cur_step)
             tf.summary.scalar('Pred/Pred_D', err_dr, step=cur_step)
 
-            for i, layer in enumerate(modelG.layers):
+            # for i, layer in enumerate(modelG.layers):
 
-                if 'mapping' == layer.name:
-                    for l in layer.dense_layers:
-                        tf.summary.histogram(
-                            f'Mapping/{layer.name}/{l.name}/weight',
-                            l.w,
-                            step=cur_step)
-                    for l in layer.bias_act_layers:
-                        tf.summary.histogram(
-                            f'Mapping/{layer.name}/{l.name}/bias',
-                            l.b,
-                            step=cur_step)
+            #     if 'mapping' == layer.name:
+            #         for l in layer.dense_layers:
+            #             tf.summary.histogram(
+            #                 f'Mapping/{layer.name}/{l.name}/weight',
+            #                 l.w,
+            #                 step=cur_step)
+            #         for l in layer.bias_act_layers:
+            #             tf.summary.histogram(
+            #                 f'Mapping/{layer.name}/{l.name}/bias',
+            #                 l.b,
+            #                 step=cur_step)
 
-                if 'const_layer' == layer.name:
-                    tf.summary.histogram(f'Init/{layer.name}/const',
-                                         layer.const,
-                                         step=cur_step)
+            #     if 'const_layer' == layer.name:
+            #         tf.summary.histogram(f'Init/{layer.name}/const',
+            #                              layer.const,
+            #                              step=cur_step)
 
-                if 'epilogue' in layer.name:
-                    tf.summary.histogram(
-                        f'Epilogue/{layer.name}/inject_noise/weight',
-                        layer.inject_noise.w,
-                        step=cur_step)
-                    tf.summary.histogram(
-                        f'Epilogue/{layer.name}/adain/scale_weight',
-                        layer.adain.style_scale_transform_dense.w,
-                        step=cur_step)
-                    tf.summary.histogram(
-                        f'Epilogue/{layer.name}/adain/scale_bias',
-                        layer.adain.style_scale_transform_bias.b,
-                        step=cur_step)
-                    tf.summary.histogram(
-                        f'Epilogue/{layer.name}/adain/shift_weight',
-                        layer.adain.style_shift_transform_dense.w,
-                        step=cur_step)
-                    tf.summary.histogram(
-                        f'Epilogue/{layer.name}/adain/shift_bias',
-                        layer.adain.style_shift_transform_bias.b,
-                        step=cur_step)
+            #     if 'epilogue' in layer.name:
+            #         tf.summary.histogram(
+            #             f'Epilogue/{layer.name}/inject_noise/weight',
+            #             layer.inject_noise.w,
+            #             step=cur_step)
+            #         tf.summary.histogram(
+            #             f'Epilogue/{layer.name}/adain/scale_weight',
+            #             layer.adain.style_scale_transform_dense.w,
+            #             step=cur_step)
+            #         tf.summary.histogram(
+            #             f'Epilogue/{layer.name}/adain/scale_bias',
+            #             layer.adain.style_scale_transform_bias.b,
+            #             step=cur_step)
+            #         tf.summary.histogram(
+            #             f'Epilogue/{layer.name}/adain/shift_weight',
+            #             layer.adain.style_shift_transform_dense.w,
+            #             step=cur_step)
+            #         tf.summary.histogram(
+            #             f'Epilogue/{layer.name}/adain/shift_bias',
+            #             layer.adain.style_shift_transform_bias.b,
+            #             step=cur_step)
 
             # for g, v in zip(gradientsG, modelG.layers):
             #     tf.summary.histogram("GradientG/{}/grad_histogram".format(v.name), g, step=cur_step)
