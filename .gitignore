@@ -1,0 +1,12 @@
+.DS_Store
+.ipynb_checkpoints/
+__pycache__/
+backup_results/
+datasets/
+*-256.tfrecords
+*.h5
+logs-old/
+logs/
+testmesh/
+train_results/
+eval_results/
