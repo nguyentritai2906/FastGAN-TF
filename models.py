@@ -201,7 +201,7 @@ class Mapping(layers.Layer):
             x = dense(x)
             x = apply_bias_act(x)
 
-        # x = InstanceNormalization(axis=-1)(x)
+        x = InstanceNormalization(axis=-1)(x)
 
         return x
 
