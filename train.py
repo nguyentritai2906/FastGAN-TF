@@ -388,7 +388,7 @@ def main(args):
                 tf.summary.image("Fixed noise",
                                  tf.expand_dims(grid_pred, 0),
                                  step=cur_step)
-        elif cur_step % 50 == 0:
+        elif cur_step % 500 == 0:
             backup_para = modelG.get_weights()
             modelG.set_weights(avg_param_G)
             avg_model_pred_fnoise = modelG(fixed_noise)
