@@ -479,7 +479,7 @@ class Swish(layers.Layer):
         super(Swish, self).__init__(**kwargs)
 
     def call(self, x):
-        return x * tf.nn.sigmoid(x)
+        return x * tf.math.sigmoid(x)
 
 
 class GLU(layers.Layer):
@@ -529,18 +529,10 @@ class SEBlock(layers.Layer):
         self.block = tf.keras.Sequential([
             tfa.layers.AdaptiveAveragePooling2D(4),
             SpectralNormalization(
-                layers.Conv2D(channel_out,
-                              4,
-                              1,
-                              padding='valid',
-                              use_bias=False)),
+                layers.Conv2D(channel_out, 4, 1, use_bias=False)),
             Swish(),
             SpectralNormalization(
-                layers.Conv2D(channel_out,
-                              1,
-                              1,
-                              padding='valid',
-                              use_bias=False)),
+                layers.Conv2D(channel_out, 1, 1, use_bias=False)),
             layers.Activation('sigmoid')
         ])
 
@@ -561,7 +553,8 @@ class UpBlock(layers.Layer):
 
         self.upsample = layers.UpSampling2D()
         self.block = tf.keras.Sequential([
-            layers.Conv2D(out_planes * 2, 3, 1, 'same', use_bias=False),
+            SpectralNormalization(
+                layers.Conv2D(out_planes * 2, 3, 1, 'same', use_bias=False)),
             layers.BatchNormalization(),
             GLU(),
         ])
@@ -650,7 +643,7 @@ class DownBlockComp(layers.Layer):
         self.direct_path = tf.keras.Sequential([
             layers.AveragePooling2D(2, 2),
             SpectralNormalization(
-                layers.Conv2D(out_planes, 1, 1, 'valid', use_bias=False)),
+                layers.Conv2D(out_planes, 1, 1, use_bias=False)),
             layers.BatchNormalization(),
             layers.LeakyReLU(0.2),
         ])
@@ -712,11 +705,11 @@ class SimpleDecoder(layers.Layer):
 
 class Discriminator(Model):
 
-    def __init__(self, ndf=64, im_size=256):
+    def __init__(self, factor=64, im_size=256):
         super(Discriminator, self).__init__()
         self.im_size = im_size
-        self.ndf = ndf
-        self.nfc_multi = {
+        self.factor = factor
+        self.f_channels_multi = {
             4: 16,
             8: 16,
             16: 8,
@@ -727,18 +720,24 @@ class Discriminator(Model):
             512: 0.25,
             1024: 0.125
         }
-        self.nfc = {}
-        for k, v in self.nfc_multi.items():
-            self.nfc[k] = int(v * ndf)
+        self.f_channels = {}
+        for k, v in self.f_channels_multi.items():
+            self.f_channels[k] = int(v * factor)
 
         if im_size == 1024:
             self.feat_2 = tf.keras.Sequential([
                 SpectralNormalization(
-                    layers.Conv2D(self.nfc[1024], 4, 2, 'same',
+                    layers.Conv2D(self.f_channels[1024],
+                                  4,
+                                  2,
+                                  'same',
                                   use_bias=False)),
                 layers.LeakyReLU(0.2),
                 SpectralNormalization(
-                    layers.Conv2D(self.nfc[512], 4, 2, 'same',
+                    layers.Conv2D(self.f_channels[512],
+                                  4,
+                                  2,
+                                  'same',
                                   use_bias=False)),
                 layers.BatchNormalization(),
                 layers.LeakyReLU(0.2)
@@ -746,29 +745,36 @@ class Discriminator(Model):
         elif im_size == 512:
             self.feat_2 = tf.keras.Sequential([
                 SpectralNormalization(
-                    layers.Conv2D(self.nfc[512], 4, 2, 'same',
+                    layers.Conv2D(self.f_channels[512],
+                                  4,
+                                  2,
+                                  'same',
                                   use_bias=False)),
                 layers.LeakyReLU(0.2)
             ])
         elif im_size == 256:
             self.feat_2 = tf.keras.Sequential([
                 SpectralNormalization(
-                    layers.Conv2D(self.nfc[512], 4, 1, 'same',
+                    layers.Conv2D(self.f_channels[512],
+                                  4,
+                                  1,
+                                  'same',
                                   use_bias=False)),
                 layers.LeakyReLU(0.2)
             ])
 
-        self.feat_4 = DownBlockComp(self.nfc[256])
-        self.feat_8 = DownBlockComp(self.nfc[128])
+        self.feat_4 = DownBlockComp(self.f_channels[256])
+        self.feat_8 = DownBlockComp(self.f_channels[128])
 
-        self.feat_16 = DownBlockComp(self.nfc[64])
-        self.se_block_16 = SEBlock(self.nfc[64])
-        self.feat_32 = DownBlockComp(self.nfc[32])
-        self.se_block_32 = SEBlock(self.nfc[32])
-        self.feat_last = DownBlockComp(self.nfc[16])
-        self.se_block_last = SEBlock(self.nfc[16])
+        self.feat_16 = DownBlockComp(self.f_channels[64])
+        self.se_block_16 = SEBlock(self.f_channels[64])
+        self.feat_32 = DownBlockComp(self.f_channels[32])
+        self.se_block_32 = SEBlock(self.f_channels[32])
+        self.feat_last = DownBlockComp(self.f_channels[16])
+        self.se_block_last = SEBlock(self.f_channels[16])
 
         self.out = tf.keras.Sequential([
+            DownBlockComp(self.f_channels[8]),
             SpectralNormalization(layers.Conv2D(1, 4, 1, use_bias=False)),
             layers.Flatten(),
             layers.Dense(1)
@@ -794,21 +800,26 @@ class Discriminator(Model):
         config = super(Discriminator, self).get_config()
         config.update({
             'im_size': self.im_size,
-            'ndf': self.ndf,
+            'factor': self.factor,
         })
         return config
 
 
 class Generator(Model):
 
-    def __init__(self, ngf=64, im_size=256, nc=3, **kwargs):
+    def __init__(self,
+                 w_dim=256,
+                 factor=64,
+                 im_size=256,
+                 image_channels=3,
+                 **kwargs):
         super(Generator, self).__init__(**kwargs)
         assert im_size in [256, 512,
                            1024], 'im_size must be in [256, 512, 1024]'
         self.im_size = im_size
-        self.nc = nc
-        self.ngf = ngf
-        self.nfc_multi = {
+        self.image_channels = image_channels
+        self.factor = factor
+        self.f_channels_multi = {
             4: 16,
             8: 8,
             16: 4,
@@ -819,35 +830,34 @@ class Generator(Model):
             512: 0.25,
             1024: 0.125
         }
-        self.nfc = {}
-        for k, v in self.nfc_multi.items():
-            self.nfc[k] = int(v * ngf)
+        self.f_channels = {}
+        for k, v in self.f_channels_multi.items():
+            self.f_channels[k] = int(v * factor)
 
-    def build(self, input_shape):
-        self.mapping = Mapping(8, input_shape[-1])
-        self.const = ConstLayer(input_shape[-1])
+        self.mapping = Mapping(8, w_dim)
+        self.const = ConstLayer(w_dim)
 
-        self.feat_8 = UpBlockComp(self.nfc[8])
-        self.feat_16 = UpBlock(self.nfc[16])
-        self.feat_32 = UpBlockComp(self.nfc[32])
-        self.feat_64 = UpBlock(self.nfc[64])
-        self.feat_128 = UpBlockComp(self.nfc[128])
-        self.feat_256 = UpBlock(self.nfc[256])
+        self.feat_8 = UpBlockComp(self.f_channels[8])
+        self.feat_16 = UpBlock(self.f_channels[16])
+        self.feat_32 = UpBlockComp(self.f_channels[32])
+        self.feat_64 = UpBlock(self.f_channels[64])
+        self.feat_128 = UpBlockComp(self.f_channels[128])
+        self.feat_256 = UpBlock(self.f_channels[256])
 
         if self.im_size == 512:
-            self.feat_512 = UpBlockComp(self.nfc[512])
-            self.se_block_512 = SEBlock(self.nfc[512])
+            self.feat_512 = UpBlockComp(self.f_channels[512])
+            self.se_block_512 = SEBlock(self.f_channels[512])
         elif self.im_size == 1024:
-            self.feat_512 = UpBlockComp(self.nfc[512])
-            self.se_block_512 = SEBlock(self.nfc[512])
-            self.feat_1024 = UpBlock(self.nfc[1024])
+            self.feat_512 = UpBlockComp(self.f_channels[512])
+            self.se_block_512 = SEBlock(self.f_channels[512])
+            self.feat_1024 = UpBlock(self.f_channels[1024])
 
-        self.se_block_64 = SEBlock(self.nfc[64])
-        self.se_block_128 = SEBlock(self.nfc[128])
-        self.se_block_256 = SEBlock(self.nfc[256])
+        self.se_block_64 = SEBlock(self.f_channels[64])
+        self.se_block_128 = SEBlock(self.f_channels[128])
+        self.se_block_256 = SEBlock(self.f_channels[256])
 
         self.to_big = SpectralNormalization(
-            layers.Conv2D(self.nc, 3, 1, 'same', use_bias=False))
+            layers.Conv2D(self.image_channels, 3, 1, 'same', use_bias=False))
         self.act = layers.Activation('tanh')
 
     def call(self, x, y):
@@ -881,14 +891,15 @@ class Generator(Model):
         return output
 
     def compute_output_shape(self, input_shape):
-        return (None, self.im_size, self.im_size, self.nc)
+        return (None, self.im_size, self.im_size, self.image_channels)
 
     def get_config(self):
         config = super(Generator, self).get_config()
         config.update({
-            'nc': self.nc,
-            'ngf': self.ngf,
-            'im_size': self.im_size
+            'image_channels': self.image_channels,
+            'factor': self.factor,
+            'im_size': self.im_size,
+            'w_dim': self.w_dim,
         })
         return config
 
