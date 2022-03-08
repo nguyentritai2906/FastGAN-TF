@@ -122,6 +122,9 @@ def generate_landmarks(image):
                     landmarks.append(landmark.y)
                     landmarks.append(landmark.z)
 
+    if len(landmarks) == 0:
+        return tf.zeros([468, 3])
+
     return tf.reshape(landmarks, [468, 3])
 
 
