@@ -133,7 +133,3 @@ def imgs_to_landmarks(imgs):
         landmarks = generate_landmarks(img)
         landmarks_arrays.append(landmarks)
     return tf.convert_to_tensor(landmarks_arrays)
-
-
-def cal_mse_landmarks(landmarks_gt, landmarks_pred):
-    return tf.reduce_mean(tf.square(landmarks_gt - landmarks_pred))

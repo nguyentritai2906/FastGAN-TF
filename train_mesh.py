@@ -14,8 +14,8 @@ from tensorflow.keras import utils as kutils
 
 from diffaug import DiffAugment
 from models_mesh import Discriminator, Generator
-from operation import (ProgressBar, cal_mse_landmarks, crop_image_by_part,
-                       get_dir, imgrid, imgs_to_landmarks)
+from operation import (ProgressBar, crop_image_by_part, get_dir, imgrid,
+                       imgs_to_landmarks)
 
 try:
     import IPython.core.ultratb
@@ -229,8 +229,9 @@ def main(args):
             pred_g = modelD(fake_images, training=True)
             mean_g = tf.reduce_mean(pred_g, axis=1)
 
-            pred_meshes = imgs_to_landmarks(fake_images)
-            mse_mesh = cal_mse_landmarks(meshes, pred_meshes)
+            pred_meshes = tf.py_function(imgs_to_landmarks, fake_images,
+                                         tf.float16)
+            mse_mesh = tf.reduce_mean(tf.square(meshes - pred_meshes))
 
             err_g = (mse_mesh - tf.reduce_sum(mean_g)) * BATCH_SCALER
 
