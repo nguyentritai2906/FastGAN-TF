@@ -166,7 +166,7 @@ def main(args):
                                  0,
                                  1,
                                  dtype=tf.float16)
-        fake_images = modelG([noise, meshes], training=True)
+        fake_images = modelG(noise, meshes, training=True)
 
         alpha = tf.random.uniform((int(BATCH_SIZE / N_GPU), 1, 1, 1),
                                   0,
@@ -224,7 +224,7 @@ def main(args):
                                      0,
                                      1,
                                      dtype=tf.float16)
-            fake_images = modelG([noise, meshes], training=True)
+            fake_images = modelG(noise, meshes, training=True)
 
             pred_g = modelD(fake_images, training=True)
             mean_g = tf.reduce_mean(pred_g, axis=1)
@@ -346,12 +346,12 @@ def main(args):
             real_images = strategy.gather(real_images, 0)
             meshes = strategy.gather(meshes, 0)
 
-            model_pred_fnoise = modelG([fixed_noise, meshes])
+            model_pred_fnoise = modelG(fixed_noise, meshes)
 
             backup_para = modelG.get_weights()
             modelG.set_weights(avg_param_G)
 
-            avg_model_pred_fnoise = modelG([fixed_noise, meshes])
+            avg_model_pred_fnoise = modelG(fixed_noise, meshes)
             modelG.set_weights(backup_para)
 
             all_imgs = tf.concat([
@@ -378,7 +378,7 @@ def main(args):
         elif cur_step % 500 == 0:
             backup_para = modelG.get_weights()
             modelG.set_weights(avg_param_G)
-            avg_model_pred_fnoise = modelG([fixed_noise, meshes])
+            avg_model_pred_fnoise = modelG(fixed_noise, meshes)
             grid_pred = imgrid((avg_model_pred_fnoise + 1) * 0.5, 4)
             kutils.save_img(IMAGE_FOLDER + '/%06d_fix.jpg' % cur_step,
                             grid_pred)
