@@ -6,6 +6,7 @@ import sys
 import time
 
 import mediapipe as mp
+import numpy as np
 import tensorflow as tf
 
 
