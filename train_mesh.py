@@ -231,7 +231,8 @@ def main(args):
 
             pred_meshes = tf.py_function(imgs_to_landmarks, [fake_images],
                                          tf.float16)
-            mse_mesh = tf.reduce_mean(tf.square(meshes - pred_meshes))
+            mse_mesh = tf.reduce_mean(
+                tf.square(tf.cast(meshes, tf.float16) - pred_meshes))
 
             err_g = (mse_mesh - tf.reduce_sum(mean_g)) * BATCH_SCALER
 
