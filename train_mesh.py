@@ -227,7 +227,7 @@ def main(args):
             fake_images = modelG(noise, meshes, training=True)
 
             pred_g = modelD(fake_images, training=True)
-            mean_g = tf.reduce_mean(pred_g, axis=1)
+            mean_g = tf.reduce_mean(pred_g)
 
             pred_meshes = tf.py_function(imgs_to_landmarks, [fake_images],
                                          tf.float16)
