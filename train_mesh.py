@@ -76,9 +76,9 @@ def main(args):
     IM_SIZE = args.im_size
     LR = args.lr
 
-    NDF = 64
-    NGF = 64
-    NZ = 256
+    D_FACTOR = 64
+    G_FACTOR = 64
+    W_DIM = 256
     N_CRITIC_ITER = 1
     N_GENERATOR_ITER = 1
     N_BALANCE_ITER = 2
@@ -98,9 +98,9 @@ def main(args):
     ## Model
     strategy = tf.distribute.MirroredStrategy(devices=None)
     with strategy.scope():
-        modelG = Generator(ngf=NGF, im_size=IM_SIZE)
-        modelG(tf.random.normal((1, NZ)), tf.random.normal((1, 468, 3)))
-        modelD = Discriminator(ndf=NDF, im_size=IM_SIZE)
+        modelG = Generator(w_dim=W_DIM, factor=G_FACTOR, im_size=IM_SIZE)
+        modelG(tf.random.normal((1, W_DIM)), tf.random.normal((1, 468, 3)))
+        modelD = Discriminator(factor=D_FACTOR, im_size=IM_SIZE)
         modelD(tf.random.normal((1, IM_SIZE, IM_SIZE, 3)))
         optimizerG = mixed_precision.LossScaleOptimizer(optimizers.RMSprop(LR))
         optimizerD = mixed_precision.LossScaleOptimizer(optimizers.RMSprop(LR))
@@ -161,7 +161,7 @@ def main(args):
     ## Train functions
     @tf.function()
     def train_d(real_images, meshes):
-        noise = tf.random.normal((int(BATCH_SIZE / N_GPU), NZ),
+        noise = tf.random.normal((int(BATCH_SIZE / N_GPU), W_DIM),
                                  0,
                                  1,
                                  dtype=tf.float16)
@@ -219,7 +219,7 @@ def main(args):
     @tf.function()
     def train_g(meshes):
         with tf.GradientTape() as g_tape:
-            noise = tf.random.normal((int(BATCH_SIZE / N_GPU), NZ),
+            noise = tf.random.normal((int(BATCH_SIZE / N_GPU), W_DIM),
                                      0,
                                      1,
                                      dtype=tf.float16)
@@ -243,7 +243,7 @@ def main(args):
         return loss_g
 
     ## Training loop
-    fixed_noise = tf.random.normal((8, NZ), 0, 1, seed=42)
+    fixed_noise = tf.random.normal((8, W_DIM), 0, 1, seed=42)
     for iteration in range(current_iteration, TOTAL_ITERATIONS):
         checkpoint.step.assign_add(1)
         cur_step = checkpoint.step.numpy()
