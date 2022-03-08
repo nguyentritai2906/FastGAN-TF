@@ -224,7 +224,7 @@ def main(args):
 
             mse_mesh = tf.reduce_mean(
                 tf.square(tf.cast(meshes, tf.float16) - pred_meshes),
-                axis=[1, 2])
+                axis=[1, 2]) * C_LAMBDA
 
             err_g = tf.reduce_sum(tf.cast(mse_mesh, tf.float16) -
                                   mean_g) * BATCH_SCALER
