@@ -99,7 +99,7 @@ def main(args):
     strategy = tf.distribute.MirroredStrategy(devices=None)
     with strategy.scope():
         modelG = Generator(ngf=NGF, im_size=IM_SIZE)
-        modelG([tf.random.normal((1, NZ)), tf.random.normal((1, 468, 3))])
+        modelG(tf.random.normal((1, NZ)), tf.random.normal((1, 468, 3)))
         modelD = Discriminator(ndf=NDF, im_size=IM_SIZE)
         modelD(tf.random.normal((1, IM_SIZE, IM_SIZE, 3)))
         optimizerG = mixed_precision.LossScaleOptimizer(optimizers.RMSprop(LR))
