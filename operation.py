@@ -5,6 +5,7 @@ import shutil
 import sys
 import time
 
+import mediapipe as mp
 import tensorflow as tf
 
 
@@ -29,6 +30,7 @@ def get_dir(args):
 class ProgressBar(object):
     """A progress bar which can print the progress modified from
        https://github.com/hellock/cvbase/blob/master/cvbase/progress.py"""
+
     def __init__(self, task_num=0, completed=0, bar_width=25):
         self.task_num = task_num
         max_bar_width = self._get_max_bar_width()
@@ -102,3 +104,35 @@ def crop_image_by_part(image, part):
     h = part // 2 * hw
     w = part % 2 * hw
     return image[:, h:h + hw, w:w + hw, :]
+
+
+def generate_landmarks(image):
+    mp_facemesh = mp.solutions.face_mesh
+    landmarks = []
+
+    with mp_facemesh.FaceMesh(min_detection_confidence=0.5,
+                              min_tracking_confidence=0.5) as facemesh:
+
+        result = facemesh.process(image)
+        if result.multi_face_landmarks:
+            for face_landmark in result.multi_face_landmarks:
+                for landmark in face_landmark.landmark:
+                    landmarks.append(landmark.x)
+                    landmarks.append(landmark.y)
+                    landmarks.append(landmark.z)
+
+    return tf.reshape(landmarks, [468, 3])
+
+
+def imgs_to_landmarks(imgs):
+    imgs = tf.cast(imgs, tf.uint8)
+    imgs = imgs.numpy()
+    landmarks_arrays = []
+    for img in imgs:
+        landmarks = generate_landmarks(img)
+        landmarks_arrays.append(landmarks)
+    return tf.convert_to_tensor(landmarks_arrays)
+
+
+def cal_mse_landmarks(landmarks_gt, landmarks_pred):
+    return tf.reduce_mean(tf.square(landmarks_gt - landmarks_pred))

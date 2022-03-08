@@ -14,7 +14,8 @@ from tensorflow.keras import utils as kutils
 
 from diffaug import DiffAugment
 from models_mesh import Discriminator, Generator
-from operation import ProgressBar, crop_image_by_part, get_dir, imgrid
+from operation import (ProgressBar, cal_mse_landmarks, crop_image_by_part,
+                       get_dir, imgrid, imgs_to_landmarks)
 
 try:
     import IPython.core.ultratb
@@ -227,7 +228,11 @@ def main(args):
 
             pred_g = modelD(fake_images, training=True)
             mean_g = tf.reduce_mean(pred_g, axis=1)
-            err_g = -tf.reduce_sum(mean_g) * BATCH_SCALER
+
+            pred_meshes = imgs_to_landmarks(fake_images)
+            mse_mesh = cal_mse_landmarks(meshes, pred_meshes)
+
+            err_g = (mse_mesh - tf.reduce_sum(mean_g)) * BATCH_SCALER
 
             scaled_err = optimizerG.get_scaled_loss(err_g)
         scaled_gradients = g_tape.gradient(scaled_err,
@@ -235,12 +240,17 @@ def main(args):
         gradients = optimizerG.get_unscaled_gradients(scaled_gradients)
         optimizerG.apply_gradients(zip(gradients, modelG.trainable_variables))
 
-        return err_g
+        return -tf.reduce_sum(
+            mean_g) * BATCH_SCALER, mse_mesh * BATCH_SCALER, err_g
 
     def distributed_train_g(meshes):
-        loss_g = strategy.run(train_g, args=(meshes, ))
+        pred_g, mse_mesh, loss_g = strategy.run(train_g, args=(meshes, ))
         loss_g = strategy.reduce(tf.distribute.ReduceOp.SUM, loss_g, axis=None)
-        return loss_g
+        pred_g = strategy.reduce(tf.distribute.ReduceOp.SUM, pred_g, axis=None)
+        mse_mesh = strategy.reduce(tf.distribute.ReduceOp.SUM,
+                                   mse_mesh,
+                                   axis=None)
+        return pred_g, mse_mesh, loss_g
 
     ## Training loop
     fixed_noise = tf.random.normal((8, W_DIM), 0, 1, seed=42)
@@ -256,11 +266,11 @@ def main(args):
 
         if iteration == current_iteration:
             tf.summary.trace_on(graph=True)
-            loss_g = distributed_train_g(meshes)
+            pred_g, mse_mesh, loss_g = distributed_train_g(meshes)
             with summary_writer_1.as_default():
                 tf.summary.trace_export(name='Graph', step=0)
         else:
-            loss_g = distributed_train_g(meshes)
+            pred_g, mse_mesh, loss_g = distributed_train_g(meshes)
 
         # Update current and previous loss
         if iteration == current_iteration:
@@ -281,7 +291,7 @@ def main(args):
                 update_D += 1
                 ldc = loss_d
             else:
-                loss_g = distributed_train_g(meshes)
+                pred_g, mse_mesh, loss_g = distributed_train_g(meshes)
                 update_G += 1
                 lgc = loss_g
 
@@ -291,11 +301,12 @@ def main(args):
         with summary_writer_1.as_default():
             tf.summary.scalar('Pred/Pred_Dr', err_dr, step=cur_step)
             tf.summary.scalar('Pred/Pred_Df', err_df, step=cur_step)
-            tf.summary.scalar('Pred/Pred_G', -loss_g, step=cur_step)
+            tf.summary.scalar('Pred/Pred_G', pred_g, step=cur_step)
 
             tf.summary.scalar('Loss/Loss_G', loss_g, step=cur_step)
             tf.summary.scalar('Loss/Loss_D', loss_d, step=cur_step)
             tf.summary.scalar('Loss/Loss_GP', gradient_penalty, step=cur_step)
+            tf.summary.scalar('Loss/Loss_MSE', mse_mesh, step=cur_step)
 
             tf.summary.scalar('Misc/Balance',
                               update_D - update_G,
@@ -334,7 +345,7 @@ def main(args):
         prog_bar.update(
             "Pred Dr: {:>9.5f}, Pred Df: {:>9.5f}, Pred G: {:>9.5f}".format(
                 tf.cast(err_dr, 'float32'), tf.cast(err_df, 'float32'),
-                tf.cast(-loss_g, 'float32')))
+                tf.cast(pred_g, 'float32')))
 
         for i, (w, avg_w) in enumerate(zip(modelG.get_weights(), avg_param_G)):
             avg_param_G[i] = avg_w * 0.999 + 0.001 * w

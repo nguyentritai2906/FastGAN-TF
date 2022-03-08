@@ -48,9 +48,25 @@ def image_example(image_string, landmarks):
     return tf.train.Example(features=tf.train.Features(feature=feature))
 
 
-def main(args):
+def generate_landmarks(image):
     mp_facemesh = mp.solutions.face_mesh
-    mp_draw = mp.solutions.drawing_utils
+    landmarks = []
+
+    with mp_facemesh.FaceMesh(min_detection_confidence=0.5,
+                              min_tracking_confidence=0.5) as facemesh:
+
+        result = facemesh.process(image)
+        if result.multi_face_landmarks:
+            for face_landmark in result.multi_face_landmarks:
+                for landmark in face_landmark.landmark:
+                    landmarks.append(landmark.x)
+                    landmarks.append(landmark.y)
+                    landmarks.append(landmark.z)
+
+    return landmarks
+
+
+def main(args):
 
     fnames = glob.glob(os.path.join(args.path, '*.jpg'))
     assert len(fnames) == 70000
@@ -61,19 +77,9 @@ def main(args):
 
     with tf.io.TFRecordWriter(record_file) as writer:
         for filename in tqdm(fnames):
-            landmarks = []
             image = cv2.imread(filename)
 
-            with mp_facemesh.FaceMesh(min_detection_confidence=0.5,
-                                      min_tracking_confidence=0.5) as facemesh:
-
-                result = facemesh.process(image)
-                if result.multi_face_landmarks:
-                    for face_landmark in result.multi_face_landmarks:
-                        for landmark in face_landmark.landmark:
-                            landmarks.append(landmark.x)
-                            landmarks.append(landmark.y)
-                            landmarks.append(landmark.z)
+            landmarks = generate_landmarks(image)
 
             if len(landmarks) != 1404:
                 failed += 1
