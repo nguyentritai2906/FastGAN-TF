@@ -229,7 +229,7 @@ def main(args):
             pred_g = modelD(fake_images, training=True)
             mean_g = tf.reduce_mean(pred_g, axis=1)
 
-            pred_meshes = tf.py_function(imgs_to_landmarks, fake_images,
+            pred_meshes = tf.py_function(imgs_to_landmarks, [fake_images],
                                          tf.float16)
             mse_mesh = tf.reduce_mean(tf.square(meshes - pred_meshes))
 
