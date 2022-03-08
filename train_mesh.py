@@ -1,21 +1,15 @@
 import argparse
-import datetime
-import glob
 import logging
-import os
-import random
 
 logging.getLogger('tensorflow').disabled = True
 
 import tensorflow as tf
-from tensorflow import nn
 from tensorflow.keras import mixed_precision, optimizers
 from tensorflow.keras import utils as kutils
 
 from diffaug import DiffAugment
 from models_mesh import Discriminator, Generator
-from operation import (ProgressBar, crop_image_by_part, get_dir, imgrid,
-                       imgs_to_landmarks)
+from operation import ProgressBar, get_dir, imgrid, imgs_to_landmarks
 
 try:
     import IPython.core.ultratb
@@ -33,10 +27,6 @@ mixed_precision.set_global_policy('mixed_float16')
 def parse_args():
     parser = argparse.ArgumentParser(description='')
 
-    parser.add_argument('--path',
-                        type=str,
-                        default='./datasets/ffhq',
-                        help='path of resource dataset')
     parser.add_argument('--name', type=str, default='', help='experiment name')
     parser.add_argument('--lpips_net',
                         type=str,
@@ -69,7 +59,6 @@ def parse_args():
 
 def main(args):
     AUTOTUNE = tf.data.AUTOTUNE
-    DATA_ROOT = args.path
     LPIPS_PATH = f'./lpips_lin_{args.lpips_net}.h5'
     TOTAL_ITERATIONS = args.iter
     BATCH_SIZE = args.batch_size
@@ -219,22 +208,26 @@ def main(args):
 
     @tf.function()
     def train_g(meshes):
+        noise = tf.random.normal((int(BATCH_SIZE / N_GPU), W_DIM),
+                                 0,
+                                 1,
+                                 dtype=tf.float16)
+        fake_images = modelG(noise, meshes, training=True)
+        pred_meshes = tf.py_function(imgs_to_landmarks, [fake_images],
+                                     tf.float16)
+
         with tf.GradientTape() as g_tape:
-            noise = tf.random.normal((int(BATCH_SIZE / N_GPU), W_DIM),
-                                     0,
-                                     1,
-                                     dtype=tf.float16)
             fake_images = modelG(noise, meshes, training=True)
 
             pred_g = modelD(fake_images, training=True)
-            mean_g = tf.reduce_mean(pred_g)
+            mean_g = tf.reduce_mean(pred_g, axis=1)
 
-            pred_meshes = tf.py_function(imgs_to_landmarks, [fake_images],
-                                         tf.float16)
             mse_mesh = tf.reduce_mean(
-                tf.square(tf.cast(meshes, tf.float16) - pred_meshes))
+                tf.square(tf.cast(meshes, tf.float16) - pred_meshes),
+                axis=[1, 2])
 
-            err_g = (mse_mesh - tf.reduce_sum(mean_g)) * BATCH_SCALER
+            err_g = tf.reduce_sum(tf.cast(mse_mesh, tf.float16) -
+                                  mean_g) * BATCH_SCALER
 
             scaled_err = optimizerG.get_scaled_loss(err_g)
         scaled_gradients = g_tape.gradient(scaled_err,
@@ -242,8 +235,8 @@ def main(args):
         gradients = optimizerG.get_unscaled_gradients(scaled_gradients)
         optimizerG.apply_gradients(zip(gradients, modelG.trainable_variables))
 
-        return -tf.reduce_sum(
-            mean_g) * BATCH_SCALER, mse_mesh * BATCH_SCALER, err_g
+        return -tf.reduce_sum(mean_g) * BATCH_SCALER, tf.reduce_sum(
+            mse_mesh) * BATCH_SCALER, err_g
 
     def distributed_train_g(meshes):
         pred_g, mse_mesh, loss_g = strategy.run(train_g, args=(meshes, ))
