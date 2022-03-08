@@ -168,7 +168,7 @@ class Mapping(layers.Layer):
             x = dense(x)
             x = apply_bias_act(x)
 
-        # x = InstanceNormalization(axis=-1)(x)
+        x = InstanceNormalization(axis=-1)(x)
 
         return x
 
@@ -447,8 +447,8 @@ class GLU(layers.Layer):
             -1] % 2 == 0, 'Last dimension of input shape must be even.'
 
     def call(self, inputs):
-        nc = int(tf.shape(inputs)[-1] / 2)
-        return inputs[:, :, :, :nc] * tf.math.sigmoid(inputs[:, :, :, nc:])
+        return inputs[:, :, :, :inputs.shape[-1] // 2] * tf.math.sigmoid(
+            inputs[:, :, :, inputs.shape[-1] // 2:])
 
 
 class InitLayer(layers.Layer):
