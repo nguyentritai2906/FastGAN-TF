@@ -126,7 +126,7 @@ def generate_landmarks(image):
 
 def imgs_to_landmarks(imgs):
     imgs = tf.cast(imgs, tf.uint8)
-    imgs = imgs.numpy()
+    imgs = np.array(imgs)
     landmarks_arrays = []
     for img in imgs:
         landmarks = generate_landmarks(img)
