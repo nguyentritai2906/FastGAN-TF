@@ -124,7 +124,6 @@ def main(args):
 
         image_raw = features['image_raw']
         image = tf.io.decode_jpeg(image_raw)
-        image = tf.image.random_flip_left_right(image)
         image = tf.cast(image, tf.float16) / 127.5 - 1
 
         landmarks = features['landmarks']
