@@ -1,54 +1,11 @@
-import math
-
 import numpy as np
 import tensorflow as tf
 import tensorflow_addons as tfa
 from keras.layers import Conv2D
-from tensorflow import keras
-from tensorflow.keras import Model, layers
-from tensorflow.keras.initializers import VarianceScaling
+from tensorflow.keras import Input, Model, layers
 from tensorflow.keras.utils import get_custom_objects
 from tensorflow.nn import depth_to_space
 from tensorflow_addons.layers import SpectralNormalization
-
-
-def conv2d(*args, **kwargs):
-    return SpectralNormalization(
-        layers.Conv2D(*args,
-                      **kwargs,
-                      kernel_initializer=tf.keras.initializers.RandomNormal(
-                          0.0, 0.02)))
-
-
-# def dense(*args, **kwargs):
-#     return layers.Dense(*args, **kwargs,
-#                         activation=tf.nn.leaky_relu)
-
-
-def convTranspose2d(*args, **kwargs):
-    return SpectralNormalization(
-        layers.Conv2DTranspose(
-            *args,
-            **kwargs,
-            kernel_initializer=tf.keras.initializers.RandomNormal(0.0, 0.02)))
-
-
-def batchNorm2d(*args, **kwargs):
-    return layers.BatchNormalization(
-        *args,
-        **kwargs,
-        gamma_initializer=tf.keras.initializers.RandomNormal(1.0, 0.02))
-
-
-def compute_runtime_coef(weight_shape, gain, lrmul):
-    fan_in = tf.reduce_prod(
-        weight_shape[:-1]
-    )  # [kernel, kernel, fmaps_in, fmaps_out] or [in, out]
-    fan_in = tf.cast(fan_in, dtype=tf.float32)
-    he_std = gain / tf.sqrt(fan_in)
-    init_std = 1.0 / lrmul
-    runtime_coef = he_std * lrmul
-    return init_std, runtime_coef
 
 
 class Dense(layers.Layer):
@@ -62,7 +19,7 @@ class Dense(layers.Layer):
     def build(self, input_shape):
         fan_in = tf.reduce_prod(input_shape[1:])
         weight_shape = [fan_in, self.fmaps]
-        init_std, self.runtime_coef = compute_runtime_coef(
+        init_std, self.runtime_coef = self.compute_runtime_coef(
             weight_shape, self.gain, self.lrmul)
 
         w_init = tf.random.normal(shape=weight_shape,
@@ -70,12 +27,22 @@ class Dense(layers.Layer):
                                   stddev=init_std)
         self.w = tf.Variable(w_init, name='w', trainable=True, dtype='float32')
 
-    def call(self, inputs, training=None, mask=None):
+    def call(self, inputs):
         weight = tf.cast(self.runtime_coef * self.w, self.compute_dtype)
         c = tf.reduce_prod(tf.shape(inputs)[1:])
         x = tf.reshape(inputs, shape=[-1, c])
         x = tf.matmul(x, weight)
         return x
+
+    def compute_runtime_coef(self, weight_shape, gain, lrmul):
+        fan_in = tf.reduce_prod(
+            weight_shape[:-1]
+        )  # [kernel, kernel, fmaps_in, fmaps_out] or [in, out]
+        fan_in = tf.cast(fan_in, dtype=tf.float32)
+        he_std = gain / tf.sqrt(fan_in)
+        init_std = 1.0 / lrmul
+        runtime_coef = he_std * lrmul
+        return init_std, runtime_coef
 
     def get_config(self):
         base_config = super(Dense, self).get_config()
@@ -125,44 +92,6 @@ class BiasAct(layers.Layer):
         return config
 
 
-class MappingTFDense(layers.Layer):
-
-    def __init__(self, n_mapping, w_dim=256, **kwargs):
-        super(MappingTFDense, self).__init__(**kwargs)
-        self.w_dim = w_dim
-        self.n_mapping = n_mapping
-
-        self.normalize = tf.keras.layers.Lambda(lambda x: x * tf.math.rsqrt(
-            tf.reduce_mean(tf.square(x), axis=-1, keepdims=True) + 1e-8))
-
-        self.dense_layers = list()
-        for _ in range(self.n_mapping):
-            self.dense_layers.append(
-                layers.Dense(w_dim, activation=tf.nn.leaky_relu))
-
-    def call(self, inputs):
-        x = inputs
-
-        # normalize inputs
-        x = self.normalize(x)
-
-        # apply mapping blocks
-        for dense in self.dense_layers:
-            x = dense(x)
-
-            # x = InstanceNormalization(-1)(x)
-
-        return x
-
-    def get_config(self):
-        config = super(MappingTFDense, self).get_config()
-        config.update({
-            'w_dim': self.w_dim,
-            'n_mapping': self.n_mapping,
-        })
-        return config
-
-
 class Mapping(layers.Layer):
 
     def __init__(self, n_mapping, w_dim=256, **kwargs):
@@ -173,7 +102,7 @@ class Mapping(layers.Layer):
         self.lrmul = 0.01
 
         self.normalize = tf.keras.layers.Lambda(lambda x: x * tf.math.rsqrt(
-            tf.reduce_mean(tf.square(x), axis=-1, keepdims=True) + 1e-8))
+            tf.reduce_mean(tf.square(x), axis=1, keepdims=True) + 1e-8))
 
         self.dense_layers = list()
         self.bias_act_layers = list()
@@ -188,9 +117,25 @@ class Mapping(layers.Layer):
                         act='lrelu',
                         name='bias_{:d}'.format(ii)))
 
-    def call(self, inputs, training=None, mask=None):
-        latents = inputs
-        x = latents
+        self.mesh_dense = Dense(w_dim,
+                                gain=self.gain,
+                                lrmul=self.lrmul,
+                                name='mesh_dense')
+        self.mesh_bias = BiasAct(lrmul=self.lrmul,
+                                 act='lrelu',
+                                 name='mesh_bias')
+        self.labels_embedding = LabelEmbedding(embed_dim=self.w_dim,
+                                               name='labels_embedding')
+        self.y_dense = Dense(w_dim,
+                             gain=self.gain,
+                             lrmul=self.lrmul,
+                             name='y_dense')
+        self.y_bias = BiasAct(lrmul=self.lrmul, act='lrelu', name='y_bias')
+
+    def call(self, x, y, training=None, mask=None):
+        y = self.y_dense(y)
+        y = self.y_bias(y)
+        # y = self.labels_embedding(y)
 
         # normalize inputs
         x = self.normalize(x)
@@ -201,7 +146,8 @@ class Mapping(layers.Layer):
             x = dense(x)
             x = apply_bias_act(x)
 
-        x = InstanceNormalization(axis=-1)(x)
+        x = tf.concat([x, y], axis=1)
+        x = InstanceNormalization(axis=1)(x)
 
         return x
 
@@ -214,6 +160,31 @@ class Mapping(layers.Layer):
         return config
 
 
+class LabelEmbedding(layers.Layer):
+
+    def __init__(self, embed_dim, **kwargs):
+        super(LabelEmbedding, self).__init__(**kwargs)
+        self.embed_dim = embed_dim
+
+    def build(self, input_shape):
+        weight_shape = [input_shape[1] * input_shape[2], self.embed_dim]
+        # tf 1.15 mean(0.0), std(1.0) default value of tf.initializers.random_normal()
+        w_init = tf.random.normal(shape=weight_shape, mean=0.0, stddev=1.0)
+        self.w = tf.Variable(w_init, name='w', trainable=True)
+
+    def call(self, inputs, training=None, mask=None):
+        inputs = layers.Flatten()(inputs)
+        x = tf.matmul(inputs, tf.cast(self.w, self.compute_dtype))
+        return x
+
+    def get_config(self):
+        config = super(LabelEmbedding, self).get_config()
+        config.update({
+            'embed_dim': self.embed_dim,
+        })
+        return config
+
+
 class AdaIN(layers.Layer):
 
     def __init__(self, channels, w_dim=256, **kwargs):
@@ -221,30 +192,26 @@ class AdaIN(layers.Layer):
         self.channels = channels
         self.w_dim = w_dim
 
+    def build(self, input_shape):
         self.instance_norm = InstanceNormalization(-1)
 
-        # self.style_scale_transform = layers.Dense(channels)
-        # self.style_shift_transform = layers.Dense(channels)
-        self.style_scale_transform_dense = Dense(channels,
+        self.style_scale_transform_dense = Dense(self.channels,
                                                  gain=np.sqrt(2),
                                                  lrmul=0.01)
-        self.style_scale_transform_bias = BiasAct(lrmul=0.01, act='linear')
-        self.style_shift_transform_dense = Dense(channels,
+        self.style_scale_transform_bias = BiasAct(lrmul=0.01, act='lrelu')
+        self.style_shift_transform_dense = Dense(self.channels,
                                                  gain=np.sqrt(2),
                                                  lrmul=0.01)
-        self.style_shift_transform_bias = BiasAct(lrmul=0.01, act='linear')
-
-    def build(self, input_shape):
-        pass
+        self.style_shift_transform_bias = BiasAct(lrmul=0.01, act='lrelu')
 
     def call(self, x, w):
         normalized_x = self.instance_norm(x)
-        # style_scale = self.style_scale_transform(w)[:, None, None, :]
-        # style_shift = self.style_shift_transform(w)[:, None, None, :]
-        style_scale = self.style_scale_transform_bias(
-            self.style_scale_transform_dense(w))[:, None, None, :]
-        style_shift = self.style_shift_transform_bias(
-            self.style_shift_transform_dense(w))[:, None, None, :]
+        style_scale = self.style_scale_transform_dense(w)
+        style_scale = self.style_scale_transform_bias(style_scale)[:, None,
+                                                                   None, :]
+        style_shift = self.style_shift_transform_dense(w)
+        style_shift = self.style_shift_transform_bias(style_shift)[:, None,
+                                                                   None, :]
 
         transformed_x = style_scale * normalized_x + style_shift
 
@@ -257,7 +224,7 @@ class LayerEpilogue(layers.Layer):
         super(LayerEpilogue, self).__init__(**kwargs)
 
     def build(self, input_shape):
-        self.inject_noise = InjectNoise()
+        self.inject_noise = PerPixelNoiseInjection()
         self.adain = AdaIN(input_shape[-1])
         self.activation = layers.LeakyReLU(alpha=0.2)
 
@@ -358,10 +325,10 @@ class PixelNormalization(layers.Layer):
             tf.reduce_mean(tf.square(x), axis=-1, keepdims=True) + epsilon)
 
 
-class NoiseInjection(layers.Layer):
+class PerChannelNoiseInjection(layers.Layer):
 
     def __init__(self, **kwargs):
-        super(NoiseInjection, self).__init__(**kwargs)
+        super(PerChannelNoiseInjection, self).__init__(**kwargs)
 
     def build(self, input_shape):
         self.w = tf.Variable(tf.zeros(input_shape[-1], dtype='float32'),
@@ -376,14 +343,16 @@ class NoiseInjection(layers.Layer):
         return feat + tf.cast(self.w, self.compute_dtype) * noise
 
 
-class InjectNoise(layers.Layer):
+class PerPixelNoiseInjection(layers.Layer):
 
     def __init__(self, **kwargs):
-        super(InjectNoise, self).__init__(**kwargs)
+        super(PerPixelNoiseInjection, self).__init__(**kwargs)
 
     def build(self, input_shape):
-        w_init = tf.random.normal(shape=(1, 1, 1, input_shape[-1]),
-                                  dtype=tf.dtypes.float32)
+        # w_init = tf.random.normal(shape=(1, 1, 1, input_shape[-1]),
+        #                           dtype=tf.dtypes.float32)
+        w_init = tf.zeros(shape=(1, 1, 1, input_shape[-1]),
+                          dtype=tf.dtypes.float32)
         self.w = tf.Variable(w_init, trainable=True, name='w')
 
     def call(self, inputs, noise=None):
@@ -399,34 +368,7 @@ class InjectNoise(layers.Layer):
         return x
 
     def get_config(self):
-        config = super(InjectNoise, self).get_config()
-        config.update({})
-        return config
-
-
-class Noise(layers.Layer):
-
-    def __init__(self, **kwargs):
-        super(Noise, self).__init__(**kwargs)
-
-    def build(self, input_shape):
-        w_init = tf.zeros(shape=(), dtype=tf.dtypes.float32)
-        self.noise_strength = tf.Variable(w_init, trainable=True, name='w')
-
-    def call(self, inputs, noise=None, training=None, mask=None):
-        x_shape = tf.shape(inputs)
-
-        # noise: [1, x_shape[1], x_shape[2], 1] or None
-        if noise is None:
-            noise = tf.random.normal(shape=(x_shape[0], x_shape[1], x_shape[2],
-                                            1),
-                                     dtype=tf.dtypes.float32)
-
-        x = inputs + tf.cast(noise * self.noise_strength, dtype=inputs.dtype)
-        return x
-
-    def get_config(self):
-        config = super(Noise, self).get_config()
+        config = super(PerPixelNoiseInjection, self).get_config()
         config.update({})
         return config
 
@@ -493,280 +435,486 @@ class SubpixelConv2D(Conv2D):
         return dict(list(base_config.items()) + list(config.items()))
 
 
-get_custom_objects().update({
-    'SubpixelConv2D': SubpixelConv2D,
-    'NoiseInjection': NoiseInjection,
-    'InstanceNormalization': InstanceNormalization,
-    'StyleModulation': StyleModulation,
-    'PixelNormalization': PixelNormalization,
-    'ConstLayer': ConstLayer,
-    'Dense': Dense,
-    'Mapping': Mapping,
-    'MappingTFDense': MappingTFDense,
-    'BiasAct': BiasAct,
-    'Noise': Noise,
-    'AdaIN': AdaIN,
-    'LayerEpilogue': LayerEpilogue,
-    'InjectNoise': InjectNoise,
-})
+class Swish(layers.Layer):
+
+    def __init__(self, **kwargs):
+        super(Swish, self).__init__(**kwargs)
+
+    def call(self, x):
+        return x * tf.math.sigmoid(x)
 
 
-def swish(feat):
-    return feat * tf.math.sigmoid(feat)
+class GLU(layers.Layer):
+
+    def __init__(self, **kwargs):
+        super(GLU, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        assert input_shape[
+            -1] % 2 == 0, 'Last dimension of input shape must be even.'
+
+    def call(self, inputs):
+        return inputs[:, :, :, :inputs.shape[-1] // 2] * tf.math.sigmoid(
+            inputs[:, :, :, inputs.shape[-1] // 2:])
 
 
-def glu(x):
-    nc = x.shape[-1]
-    assert nc % 2 == 0, 'channels is not divisible by 2!'
-    nc = int(nc / 2)
-    return x[:, :, :, :nc] * tf.math.sigmoid(x[:, :, :, nc:])
+class InitLayer(layers.Layer):
+
+    def __init__(self, channel, **kwargs):
+        super(InitLayer, self).__init__(**kwargs)
+        self.channel = channel
+
+        self.init = tf.keras.Sequential([
+            layers.Reshape((1, 1, -1)),
+            SpectralNormalization(
+                layers.Conv2DTranspose(channel * 2, 4, 1, use_bias=False)),
+            layers.BatchNormalization(),
+            # InstanceNormalization(),
+            GLU(),
+        ])
+
+    def call(self, inputs):
+        return self.init(inputs)
+
+    def get_config(self):
+        config = super(InitLayer, self).get_config()
+        config.update({'channel': self.channel})
+        return config
 
 
-def gelu(x, approximate=False):
-    return tf.nn.gelu(x, approximate=approximate)
+class SEBlock(layers.Layer):
+
+    def __init__(self, channel_out, **kwargs):
+        super(SEBlock, self).__init__(**kwargs)
+        self.channel_out = channel_out
+
+        self.block = tf.keras.Sequential([
+            tfa.layers.AdaptiveAveragePooling2D(4),
+            SpectralNormalization(
+                layers.Conv2D(channel_out, 4, 1, use_bias=False)),
+            Swish(),
+            SpectralNormalization(
+                layers.Conv2D(channel_out, 1, 1, use_bias=False)),
+            layers.Activation('sigmoid')
+        ])
+
+    def call(self, x_small, x_big):
+        return x_big * self.block(x_small)
+
+    def get_config(self):
+        base_config = super(SEBlock, self).get_config()
+        config = {'channel_out': self.channel_out}
+        return dict(list(base_config.items()) + list(config.items()))
 
 
-def init_layer(noise, channel):
-    noise = layers.Reshape((1, 1, -1))(noise)
-    noise = convTranspose2d(channel * 2, 4, 1, use_bias=False)(noise)
-    noise = batchNorm2d()(noise)
-    # noise = InstanceNormalization()(noise)
-    noise = glu(noise)
-    return noise
+class UpBlock(layers.Layer):
+
+    def __init__(self, out_planes, **kwargs):
+        super(UpBlock, self).__init__(**kwargs)
+        self.out_planes = out_planes
+
+        self.upsample = layers.UpSampling2D()
+        self.block = tf.keras.Sequential([
+            SpectralNormalization(
+                layers.Conv2D(out_planes * 2, 3, 1, 'same', use_bias=False)),
+            layers.BatchNormalization(),
+            GLU(),
+        ])
+        self.epilogue = LayerEpilogue()
+
+    def call(self, x, w=None):
+        x = self.upsample(x)
+        x = self.block(x)
+        if w is not None:
+            x = self.epilogue(x, w)
+        return x
 
 
-def leaky_relu(x, alpha=0.2):
-    return tf.nn.leaky_relu(x, alpha=0.2)
+class UpBlockComp(layers.Layer):
+
+    def __init__(self, out_planes, **kwargs):
+        super(UpBlockComp, self).__init__(**kwargs)
+        self.out_planes = out_planes
+
+        self.upsample = layers.UpSampling2D()
+        self.block_1 = tf.keras.Sequential([
+            SpectralNormalization(
+                layers.Conv2D(out_planes * 2, 3, 1, 'same', use_bias=False)),
+            layers.BatchNormalization(),
+            GLU(),
+        ])
+        self.block_2 = tf.keras.Sequential([
+            SpectralNormalization(
+                layers.Conv2D(out_planes * 2, 3, 1, 'same', use_bias=False)),
+            layers.BatchNormalization(),
+            GLU(),
+        ])
+        self.epilogue_1 = LayerEpilogue()
+        self.epilogue_2 = LayerEpilogue()
+
+    def call(self, x, w=None):
+        x = self.upsample(x)
+        x = self.block_1(x)
+        if w is not None:
+            x = self.epilogue_1(x, w)
+        x = self.block_2(x)
+        if w is not None:
+            x = self.epilogue_2(x, w)
+        return x
+
+    def get_config(self):
+        base_config = super(UpBlockComp, self).get_config()
+        config = {'out_planes': self.out_planes}
+        return dict(list(base_config.items()) + list(config.items()))
 
 
-def latten_mapping(x, n_map_layers=8):
-    x = PixelNormalization()(x)
-    for _ in range(n_map_layers):
-        # x = dense(x.shape[-1], gain=np.sqrt(2))(x)
-        x = dense(x.shape[-1])(x)
-        x = batchNorm2d()(x)
-        # x = leaky_relu(x)
-    return x
+class DownBlock(layers.Layer):
+
+    def __init__(self, out_planes, **kwargs):
+        super(DownBlock, self).__init__(**kwargs)
+        self.out_planes = out_planes
+        self.down = tf.keras.Sequential([
+            SpectralNormalization(
+                layers.Conv2D(out_planes, 4, 2, 'same', use_bias=False)),
+            layers.BatchNormalization(),
+            layers.LeakyReLU(0.2),
+        ])
+
+    def call(self, inputs):
+        x = self.down(inputs)
+        return x
 
 
-def layer_epilogue(x,
-                   latten,
-                   use_noise=False,
-                   use_instance_norm=True,
-                   use_pixel_norm=False):
-    if use_noise:
-        x = Noise()(x)
-    x = leaky_relu(x)
-    if use_pixel_norm:
-        x = PixelNormalization()(x)
-    if use_instance_norm:
-        x = InstanceNormalization()(x)
-    x = StyleModulation()(x, latten)
-    return x
+class DownBlockComp(layers.Layer):
+
+    def __init__(self, out_planes, **kwargs):
+        super(DownBlockComp, self).__init__(**kwargs)
+        self.out_planes = out_planes
+
+        self.main_path = tf.keras.Sequential([
+            SpectralNormalization(
+                layers.Conv2D(out_planes, 4, 2, 'same', use_bias=False)),
+            layers.BatchNormalization(),
+            layers.LeakyReLU(0.2),
+            SpectralNormalization(
+                layers.Conv2D(out_planes, 3, 1, 'same', use_bias=False)),
+            layers.BatchNormalization(),
+            layers.LeakyReLU(0.2),
+        ])
+
+        self.direct_path = tf.keras.Sequential([
+            layers.AveragePooling2D(2, 2),
+            SpectralNormalization(
+                layers.Conv2D(out_planes, 1, 1, use_bias=False)),
+            layers.BatchNormalization(),
+            layers.LeakyReLU(0.2),
+        ])
+
+    def call(self, inputs, **kwargs):
+        main_path = self.main_path(inputs)
+        direct_path = self.direct_path(inputs)
+        return (main_path + direct_path) / 2
+
+    def get_config(self):
+        config = super(DownBlockComp, self).get_config()
+        config.update({
+            'out_planes': self.out_planes,
+        })
+        return config
 
 
-def se_block(feat_small, feat_big, ch_out):
-    feat_small = tfa.layers.AdaptiveAveragePooling2D(4)(feat_small)
-    feat_small = conv2d(ch_out, 4, 1, use_bias=False)(feat_small)
-    feat_small = swish(feat_small)
-    feat_small = conv2d(ch_out, 1, 1, use_bias=False)(feat_small)
-    feat_small = layers.Activation('sigmoid')(feat_small)
-    return feat_big * feat_small
+class SimpleDecoder(layers.Layer):
+
+    def __init__(self, nfc_in=32, nc=3, **kwargs):
+        super(SimpleDecoder, self).__init__(**kwargs)
+        self.nfc_multi = {
+            4: 16,
+            8: 8,
+            16: 4,
+            32: 2,
+            64: 2,
+            128: 1,
+            256: 0.5,
+            512: 0.25,
+            1024: 0.125
+        }
+        self.nfc = {}
+        for k, v in self.nfc_multi.items():
+            self.nfc[k] = int(nfc_in * v)
+
+        self.conv = SpectralNormalization(
+            layers.Conv2D(nc, 3, 1, 'same', use_bias=False))
+        self.up_block_16 = UpBlock(self.nfc[16])
+        self.up_block_32 = UpBlock(self.nfc[32])
+        self.up_block_64 = UpBlock(self.nfc[64])
+        self.up_block_128 = UpBlock(self.nfc[128])
+        self.act = layers.Activation('tanh')
+
+    def call(self, x):
+        x = self.up_block_16(x)
+        x = self.up_block_32(x)
+        x = self.up_block_64(x)
+        x = self.up_block_128(x)
+        x = self.conv(x)
+        x = self.act(x)
+        return x
+
+    def get_config(self):
+        base_config = super(SimpleDecoder, self).get_config()
+        config = {'nfc_in': self.nfc_in, 'nc': self.nc}
+        return dict(list(base_config.items()) + list(config.items()))
 
 
-def up_block(x, out_planes, latten=None):
-    x = layers.UpSampling2D()(x)
-    x = conv2d(out_planes * 2, 3, 1, 'same', use_bias=False)(x)
-    x = batchNorm2d()(x)
-    x = glu(x)
-    if latten is not None:
-        x = LayerEpilogue()(x, latten)
-    return x
+class Discriminator(Model):
+
+    def __init__(self, w_dim=0, factor=64, im_size=256):
+        super(Discriminator, self).__init__()
+        self.im_size = im_size
+        self.factor = factor
+        self.w_dim = w_dim
+        self.f_channels_multi = {
+            4: 16,
+            8: 16,
+            16: 8,
+            32: 4,
+            64: 2,
+            128: 1,
+            256: 0.5,
+            512: 0.25,
+            1024: 0.125
+        }
+        self.f_channels = {}
+        for k, v in self.f_channels_multi.items():
+            self.f_channels[k] = int(v * factor)
+
+        if im_size == 1024:
+            self.feat_2 = tf.keras.Sequential([
+                SpectralNormalization(
+                    layers.Conv2D(self.f_channels[1024],
+                                  4,
+                                  2,
+                                  'same',
+                                  use_bias=False)),
+                layers.LeakyReLU(0.2),
+                SpectralNormalization(
+                    layers.Conv2D(self.f_channels[512],
+                                  4,
+                                  2,
+                                  'same',
+                                  use_bias=False)),
+                layers.BatchNormalization(),
+                layers.LeakyReLU(0.2)
+            ])
+        elif im_size == 512:
+            self.feat_2 = tf.keras.Sequential([
+                SpectralNormalization(
+                    layers.Conv2D(self.f_channels[512],
+                                  4,
+                                  2,
+                                  'same',
+                                  use_bias=False)),
+                layers.LeakyReLU(0.2)
+            ])
+        elif im_size == 256:
+            self.feat_2 = tf.keras.Sequential([
+                SpectralNormalization(
+                    layers.Conv2D(self.f_channels[512],
+                                  4,
+                                  1,
+                                  'same',
+                                  use_bias=False)),
+                layers.LeakyReLU(0.2)
+            ])
+
+        self.feat_4 = DownBlockComp(self.f_channels[256])
+        self.feat_8 = DownBlockComp(self.f_channels[128])
+
+        self.feat_16 = DownBlockComp(self.f_channels[64])
+        self.se_block_16 = SEBlock(self.f_channels[64])
+        self.feat_32 = DownBlockComp(self.f_channels[32])
+        self.se_block_32 = SEBlock(self.f_channels[32])
+        self.feat_last = DownBlockComp(self.f_channels[16])
+        self.se_block_last = SEBlock(self.f_channels[16])
+
+        self.out = tf.keras.Sequential([
+            DownBlockComp(self.f_channels[8]),
+            SpectralNormalization(layers.Conv2D(1, 4, 1, use_bias=False)),
+            layers.Flatten(),
+            layers.Dense(max(self.w_dim, 1))
+        ])
+
+        if self.w_dim > 0:
+            self.y_dense = Dense(w_dim,
+                                 gain=np.sqrt(2),
+                                 lrmul=0.01,
+                                 name='y_dense')
+            self.y_bias = BiasAct(lrmul=0.01, act='lrelu', name='y_bias')
+
+    def call(self, inputs):
+        x, y = inputs
+
+        if self.w_dim > 0:
+            y = self.y_dense(y)
+            y = self.y_bias(y)
+
+        feat_2 = self.feat_2(x)
+        feat_4 = self.feat_4(feat_2)
+        feat_8 = self.feat_8(feat_4)
+        feat_16 = self.feat_16(feat_8)
+        se_block_16 = self.se_block_16(feat_2, feat_16)
+        feat_32 = self.feat_32(se_block_16)
+        se_block_32 = self.se_block_32(feat_4, feat_32)
+        feat_last = self.feat_last(se_block_32)
+        se_block_last = self.se_block_last(feat_8, feat_last)
+        output = self.out(se_block_last)
+
+        if self.w_dim > 0:
+            output = tf.reduce_sum(output * y, axis=1, keepdims=True)
+        return output
+
+    def summary(self):
+        x = Input(shape=(self.im_size, self.im_size, 3))
+        y = Input(shape=(self.w_dim, ))
+        model = Model(inputs=[x, y], outputs=self.call([x, y]))
+        return model.summary()
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0][0], max(self.w_dim, 1))
+
+    def get_config(self):
+        config = super(Discriminator, self).get_config()
+        config.update({
+            'im_size': self.im_size,
+            'factor': self.factor,
+            'w_dim': self.w_dim
+        })
+        return config
 
 
-def up_block_comp(x, out_planes, latten=None):
-    x = layers.UpSampling2D()(x)
-    x = conv2d(out_planes * 2, 3, 1, 'same', use_bias=False)(x)
-    x = batchNorm2d()(x)
-    x = glu(x)
-    if latten is not None:
-        x = LayerEpilogue()(x, latten)
-    else:
-        x = NoiseInjection()(x)
-    x = conv2d(out_planes * 2, 3, 1, 'same', use_bias=False)(x)
-    x = batchNorm2d()(x)
-    x = glu(x)
-    if latten is not None:
-        x = LayerEpilogue()(x, latten)
-    else:
-        x = NoiseInjection()(x)
-    return x
+class Generator(Model):
 
+    def __init__(self,
+                 w_dim=256,
+                 factor=64,
+                 im_size=256,
+                 image_channels=3,
+                 **kwargs):
+        super(Generator, self).__init__(**kwargs)
+        assert im_size in [256, 512,
+                           1024], 'im_size must be in [256, 512, 1024]'
+        self.w_dim = w_dim
+        self.im_size = im_size
+        self.image_channels = image_channels
+        self.factor = factor
+        self.f_channels_multi = {
+            4: 16,
+            8: 8,
+            16: 4,
+            32: 2,
+            64: 2,
+            128: 1,
+            256: 0.5,
+            512: 0.25,
+            1024: 0.125
+        }
+        self.f_channels = {}
+        for k, v in self.f_channels_multi.items():
+            self.f_channels[k] = int(v * factor)
 
-def down_block(x, out_planes):
-    x = conv2d(out_planes, 4, 2, 'same', use_bias=False)(x)
-    x = batchNorm2d()(x)
-    x = layers.LeakyReLU(0.2)(x)
-    return x
+        self.mapping = Mapping(8, w_dim)
+        self.const = ConstLayer(w_dim)
 
+        self.feat_8 = UpBlockComp(self.f_channels[8])
+        self.feat_16 = UpBlock(self.f_channels[16])
+        self.feat_32 = UpBlockComp(self.f_channels[32])
+        self.feat_64 = UpBlock(self.f_channels[64])
+        self.feat_128 = UpBlockComp(self.f_channels[128])
+        self.feat_256 = UpBlock(self.f_channels[256])
 
-def down_block_comp(x, out_planes):
-    main_path = conv2d(out_planes, 4, 2, 'same', use_bias=False)(x)
-    main_path = batchNorm2d()(main_path)
-    main_path = layers.LeakyReLU(0.2)(main_path)
-    main_path = conv2d(out_planes, 3, 1, 'same', use_bias=False)(main_path)
-    main_path = batchNorm2d()(main_path)
-    main_path = layers.LeakyReLU(0.2)(main_path)
+        if self.im_size == 512:
+            self.feat_512 = UpBlockComp(self.f_channels[512])
+            self.se_block_512 = SEBlock(self.f_channels[512])
+        elif self.im_size == 1024:
+            self.feat_512 = UpBlockComp(self.f_channels[512])
+            self.se_block_512 = SEBlock(self.f_channels[512])
+            self.feat_1024 = UpBlock(self.f_channels[1024])
 
-    direct_path = layers.AveragePooling2D(2, 2)(x)
-    direct_path = conv2d(out_planes, 1, 1, use_bias=False)(direct_path)
-    direct_path = batchNorm2d()(direct_path)
-    direct_path = layers.LeakyReLU(0.2)(direct_path)
-    return (main_path + direct_path) / 2
+        self.se_block_64 = SEBlock(self.f_channels[64])
+        self.se_block_128 = SEBlock(self.f_channels[128])
+        self.se_block_256 = SEBlock(self.f_channels[256])
 
+        self.to_big = SpectralNormalization(
+            layers.Conv2D(self.image_channels, 3, 1, 'same', use_bias=False))
+        self.act = layers.Activation('tanh')
 
-def SimpleDecoder(x, nfc_in=32, nc=3):
-    nfc_multi = {
-        4: 16,
-        8: 8,
-        16: 4,
-        32: 2,
-        64: 2,
-        128: 1,
-        256: 0.5,
-        512: 0.25,
-        1024: 0.125
-    }
-    nfc = {}
-    for k, v in nfc_multi.items():
-        nfc[k] = int(v * nfc_in)
+    def call(self, inputs):
+        x, y = inputs
+        w = self.mapping(x, y)
+        const = self.const(x)
+        feat_8 = self.feat_8(const, w)
+        feat_16 = self.feat_16(feat_8, w)
+        feat_32 = self.feat_32(feat_16, w)
+        feat_64 = self.feat_64(feat_32, w)
+        se_block_64 = self.se_block_64(const, feat_64)
+        feat_128 = self.feat_128(se_block_64, w)
+        se_block_128 = self.se_block_128(feat_8, feat_128)
+        feat_256 = self.feat_256(se_block_128, w)
+        se_block_256 = self.se_block_256(feat_16, feat_256)
 
-    x = up_block(x, nfc[16])
-    x = up_block(x, nfc[32])
-    x = up_block(x, nfc[64])
-    x = up_block(x, nfc[128])
-    x = conv2d(nc, 3, 1, 'same', use_bias=False)(x)
-    x = layers.Activation('tanh')(x)
-    return x
+        if self.im_size == 256:
+            to_big = self.to_big(se_block_256)
+            output = self.act(to_big)
+        elif self.im_size == 512:
+            feat_512 = self.feat_512(se_block_256, w)
+            se_block_512 = self.se_block_512(feat_32, feat_512)
+            to_big = self.to_big(se_block_512)
+            output = self.act(to_big)
+        else:
+            feat_512 = self.feat_512(se_block_256, w)
+            se_block_512 = self.se_block_512(feat_32, feat_512)
+            feat_1024 = self.feat_1024(se_block_512, w)
+            to_big = self.to_big(feat_1024)
+            output = self.act(to_big)
 
+        return output
 
-def Discriminator(ndf=64, nc=3, im_size=256):
-    imgs_big = keras.Input(shape=(im_size, im_size, 3))
+    def summary(self):
+        x = Input(shape=(self.im_size, self.im_size, self.image_channels))
+        y = Input(shape=(self.w_dim, ))
+        model = Model(inputs=[x, y], outputs=self.call([x, y]))
+        return model.summary()
 
-    nfc_multi = {
-        4: 16,
-        8: 16,
-        16: 8,
-        32: 4,
-        64: 2,
-        128: 1,
-        256: 0.5,
-        512: 0.25,
-        1024: 0.125
-    }
-    nfc = {}
-    for k, v in nfc_multi.items():
-        nfc[k] = int(v * ndf)
+    def compute_output_shape(self, input_shape):
+        return (None, self.im_size, self.im_size, self.image_channels)
 
-    if im_size == 1024:
-        feat_2 = conv2d(nfc[1024], 4, 2, 'same', use_bias=False)(imgs_big)
-        feat_2 = layers.LeakyReLU(0.2)(feat_2)
-        feat_2 = conv2d(nfc[512], 4, 2, 'same', use_bias=False)(feat_2)
-        feat_2 = batchNorm2d()(feat_2)
-        feat_2 = layers.LeakyReLU(0.2)(feat_2)
-    elif im_size == 512:
-        feat_2 = conv2d(nfc[512], 4, 2, 'same', use_bias=False)(imgs_big)
-        feat_2 = layers.LeakyReLU(0.2)(feat_2)
-    elif im_size == 256:
-        feat_2 = conv2d(nfc[512], 4, 1, 'same', use_bias=False)(imgs_big)
-        feat_2 = layers.LeakyReLU(0.2)(feat_2)
-
-    feat_4 = down_block_comp(feat_2, nfc[256])
-    feat_8 = down_block_comp(feat_4, nfc[128])
-
-    feat_16 = down_block_comp(feat_8, nfc[64])
-    feat_16 = se_block(feat_2, feat_16, nfc[64])
-
-    feat_32 = down_block_comp(feat_16, nfc[32])
-    feat_32 = se_block(feat_4, feat_32, nfc[32])
-
-    feat_last = down_block_comp(feat_32, nfc[16])
-    feat_last = se_block(feat_8, feat_last, nfc[16])
-
-    rf_0 = down_block_comp(feat_last, nfc[8])
-    rf_0 = conv2d(1, 4, 1, use_bias=False)(rf_0)
-    rf_0 = layers.Flatten()(rf_0)
-    rf_0 = layers.Dense(1)(rf_0)
-
-    model = Model(inputs=imgs_big, outputs=rf_0)
-    return model
-
-
-def Generator(input_shape=(256, ), ngf=64, nc=3, im_size=256):
-    nfc_multi = {
-        4: 16,
-        8: 8,
-        16: 4,
-        32: 2,
-        64: 2,
-        128: 1,
-        256: 0.5,
-        512: 0.25,
-        1024: 0.125
-    }
-    nfc = {}
-    for k, v in nfc_multi.items():
-        nfc[k] = int(v * ngf)
-
-    x = keras.Input(shape=input_shape)
-    # latten = x
-
-    # latten = latten_mapping(x, 4)
-    latten = Mapping(8)(x)
-
-    # feat_4 = init_layer(latten, channel=nfc[4])
-
-    feat_4 = ConstLayer(n_const_fmap=256)(x)
-
-    feat_8 = up_block_comp(feat_4, nfc[8], latten)
-    feat_16 = up_block(feat_8, nfc[16], latten)
-    feat_32 = up_block_comp(feat_16, nfc[32], latten)
-
-    feat_64 = se_block(feat_4, up_block(feat_32, nfc[64], latten), nfc[64])
-    feat_128 = se_block(feat_8, up_block_comp(feat_64, nfc[128], latten),
-                        nfc[128])
-    feat_256 = se_block(feat_16, up_block(feat_128, nfc[256], latten),
-                        nfc[256])
-
-    to_big = conv2d(nc, 3, 1, 'same', use_bias=False)
-
-    if im_size == 256:
-        img_256 = to_big(feat_256)
-        img_256 = layers.Activation('tanh')(img_256)
-        return Model(inputs=x, outputs=img_256)
-
-    feat_512 = se_block(feat_32, up_block_comp(feat_256, nfc[512], latten),
-                        nfc[512])
-    if im_size == 512:
-        img_512 = to_big(feat_512)
-        img_512 = layers.Activation('tanh')(img_512)
-        return Model(inputs=x, outputs=img_512)
-
-    feat_1024 = up_block(feat_512, nfc[1024], latten)
-
-    img_1024 = to_big(feat_1024)
-    img_1024 = layers.Activation('tanh')(img_1024)
-
-    model = Model(inputs=x, outputs=img_1024)
-    return model
+    def get_config(self):
+        config = super(Generator, self).get_config()
+        config.update({
+            'image_channels': self.image_channels,
+            'factor': self.factor,
+            'im_size': self.im_size,
+            'w_dim': self.w_dim,
+        })
+        return config
 
 
 if __name__ == "__main__":
-    # disc = Discriminator()
-    gen = Generator()
-    for layer in gen.layers:
-        print(layer.name)
-    # gen.summary()
-    # disc.summary()
-    # gen.save('gen.h5')
-    # tf.keras.models.load_model('gen.h5').summary()
+    W_DIM = 256
+    D_FACTOR = 64
+    G_FACTOR = 64
+    IM_SIZE = 256
+
+    disc = Discriminator(w_dim=W_DIM, factor=D_FACTOR, im_size=IM_SIZE)
+    disc([
+        tf.random.normal((1, IM_SIZE, IM_SIZE, 3)),
+        tf.random.normal((1, 468, 3))
+    ])
+    disc.summary()
+
+    gen = Generator(w_dim=W_DIM, factor=G_FACTOR, im_size=IM_SIZE)
+    gen([tf.random.normal((1, W_DIM)), tf.random.normal((1, 468, 3))])
+    gen.summary()
+
+    gen.save_weights('./checkpoints/')
+    gen.load_weights('./checkpoints/')
+    print('Success')

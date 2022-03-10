@@ -10,3 +10,4 @@ logs/
 testmesh/
 train_results/
 eval_results/
+pyrightconfig.json
