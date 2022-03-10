@@ -8,6 +8,7 @@ import time
 import mediapipe as mp
 import numpy as np
 import tensorflow as tf
+from tensorflow.keras import utils as kutils
 
 
 def get_dir(args):
@@ -136,3 +137,160 @@ def imgs_to_landmarks(imgs):
         landmarks = generate_landmarks(img)
         landmarks_arrays.append(landmarks)
     return tf.convert_to_tensor(landmarks_arrays)
+
+
+def plot_to_tensorboard(writer_1,
+                        writer_2,
+                        cur_step,
+                        real_score,
+                        fake_score,
+                        loss_d,
+                        loss_g,
+                        balance,
+                        gradient_penalty,
+                        modelG,
+                        plot_histogram=False,
+                        plot_gradient=False,
+                        gradientsG=None):
+
+    with writer_1.as_default():
+        tf.summary.scalar('Pred/Pred_Dr', real_score, step=cur_step)
+        tf.summary.scalar('Pred/Pred_Df', fake_score, step=cur_step)
+        tf.summary.scalar('Pred/Pred_G', -loss_g, step=cur_step)
+
+        tf.summary.scalar('Loss/Loss_G', loss_g, step=cur_step)
+        tf.summary.scalar('Loss/Loss_D', loss_d, step=cur_step)
+        tf.summary.scalar('Loss/Loss_GP', gradient_penalty, step=cur_step)
+
+        tf.summary.scalar('Misc/Balance', balance, step=cur_step)
+
+        # Combined
+        tf.summary.scalar('Loss/Loss', loss_d, step=cur_step)
+        tf.summary.scalar('Pred/Pred_D', real_score, step=cur_step)
+
+        if plot_histogram:
+            for _, layer in enumerate(modelG.layers):
+                if 'mapping' == layer.name:
+                    for l in layer.dense_layers:
+                        tf.summary.histogram(
+                            f'Mapping/{layer.name}/{l.name}/weight',
+                            l.w,
+                            step=cur_step)
+                    for l in layer.bias_act_layers:
+                        tf.summary.histogram(
+                            f'Mapping/{layer.name}/{l.name}/bias',
+                            l.b,
+                            step=cur_step)
+
+                if 'const_layer' == layer.name:
+                    tf.summary.histogram(f'Init/{layer.name}/const',
+                                         layer.const,
+                                         step=cur_step)
+
+                if 'epilogue' in layer.name:
+                    tf.summary.histogram(
+                        f'Epilogue/{layer.name}/inject_noise/weight',
+                        layer.inject_noise.w,
+                        step=cur_step)
+                    tf.summary.histogram(
+                        f'Epilogue/{layer.name}/adain/scale_weight',
+                        layer.adain.style_scale_transform_dense.w,
+                        step=cur_step)
+                    tf.summary.histogram(
+                        f'Epilogue/{layer.name}/adain/scale_bias',
+                        layer.adain.style_scale_transform_bias.b,
+                        step=cur_step)
+                    tf.summary.histogram(
+                        f'Epilogue/{layer.name}/adain/shift_weight',
+                        layer.adain.style_shift_transform_dense.w,
+                        step=cur_step)
+                    tf.summary.histogram(
+                        f'Epilogue/{layer.name}/adain/shift_bias',
+                        layer.adain.style_shift_transform_bias.b,
+                        step=cur_step)
+
+        if plot_gradient:
+            for g, v in zip(gradientsG, modelG.layers):
+                tf.summary.histogram("GradientG/{}/grad_histogram".format(
+                    v.name),
+                                     g,
+                                     step=cur_step)
+                tf.summary.scalar("GradientG/{}/grad/sparsity".format(v.name),
+                                  tf.reduce_sum(g),
+                                  step=cur_step)
+
+    with writer_2.as_default():
+        tf.summary.scalar('Loss/Loss', loss_g, step=cur_step)
+        tf.summary.scalar('Pred/Pred_D', fake_score, step=cur_step)
+
+
+def images_to_tensorboard(writer,
+                          cur_step,
+                          fixed_noise,
+                          real_images,
+                          meshes,
+                          modelG,
+                          avg_param_G,
+                          image_folder,
+                          save_image_to_harddisk=False):
+    ## Save image
+    if cur_step % 1000 == 0:
+        model_pred_fnoise = modelG([fixed_noise, meshes])
+
+        backup_para = modelG.get_weights()
+        modelG.set_weights(avg_param_G)
+
+        avg_model_pred_fnoise = modelG([fixed_noise, meshes])
+        modelG.set_weights(backup_para)
+
+        all_imgs = tf.concat([
+            tf.image.resize(real_images, (128, 128)),
+            tf.image.resize(model_pred_fnoise, (128, 128)),
+            tf.image.resize(avg_model_pred_fnoise, (128, 128))
+        ],
+                             axis=0)
+
+        grid_all = imgrid((all_imgs + 1) * 0.5, 8)
+        grid_pred = imgrid((avg_model_pred_fnoise + 1) * 0.5, 4)
+
+        if save_image_to_harddisk:
+            kutils.save_img(image_folder + '/%06d_all.jpg' % cur_step,
+                            grid_all)
+            kutils.save_img(image_folder + '/%06d_fix.jpg' % cur_step,
+                            grid_pred)
+        with writer.as_default():
+            tf.summary.image("All images",
+                             tf.expand_dims(grid_all, 0),
+                             step=cur_step)
+            tf.summary.image("Fixed noise",
+                             tf.expand_dims(grid_pred, 0),
+                             step=cur_step)
+    elif cur_step % 500 == 0:
+        backup_para = modelG.get_weights()
+        modelG.set_weights(avg_param_G)
+        avg_model_pred_fnoise = modelG([fixed_noise, meshes])
+        grid_pred = imgrid((avg_model_pred_fnoise + 1) * 0.5, 4)
+        if save_image_to_harddisk:
+            kutils.save_img(image_folder + '/%06d_fix.jpg' % cur_step,
+                            grid_pred)
+        modelG.set_weights(backup_para)
+        with writer.as_default():
+            tf.summary.image("Fixed noise",
+                             tf.expand_dims(grid_pred, 0),
+                             step=cur_step)
+
+
+def save_weights(modelG, avg_param_G, cur_step, total_iterations, manager,
+                 model_folder):
+
+    if cur_step % 5000 == 0 or cur_step == total_iterations:
+
+        backup_para = modelG.get_weights()
+
+        modelG.set_weights(avg_param_G)
+
+        manager.save()
+
+        tf.saved_model.save(modelG, model_folder + '/saved_model/')
+
+        modelG.set_weights(backup_para)

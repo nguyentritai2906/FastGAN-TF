@@ -5,11 +5,10 @@ logging.getLogger('tensorflow').disabled = True
 
 import tensorflow as tf
 from tensorflow.keras import mixed_precision, optimizers
-from tensorflow.keras import utils as kutils
 
-from diffaug import DiffAugment
 from models_mesh import Discriminator, Generator
-from operation import ProgressBar, get_dir, imgrid, imgs_to_landmarks
+from operation import (ProgressBar, get_dir, images_to_tensorboard,
+                       plot_to_tensorboard, save_weights)
 
 try:
     import IPython.core.ultratb
@@ -69,8 +68,6 @@ def main(args):
     D_FACTOR = 64
     G_FACTOR = 64
     W_DIM = 256
-    N_CRITIC_ITER = 1
-    N_GENERATOR_ITER = 1
     N_BALANCE_ITER = 2
     BETA1 = 0.5
     C_LAMBDA = 10
@@ -89,9 +86,12 @@ def main(args):
     strategy = tf.distribute.MirroredStrategy(devices=None)
     with strategy.scope():
         modelG = Generator(w_dim=W_DIM, factor=G_FACTOR, im_size=IM_SIZE)
-        modelG(tf.random.normal((1, W_DIM)), tf.random.normal((1, 468, 3)))
-        modelD = Discriminator(factor=D_FACTOR, im_size=IM_SIZE)
-        modelD(tf.random.normal((1, IM_SIZE, IM_SIZE, 3)))
+        modelG([tf.random.normal((1, W_DIM)), tf.random.normal((1, 468, 3))])
+        modelD = Discriminator(w_dim=W_DIM, factor=D_FACTOR, im_size=IM_SIZE)
+        modelD([
+            tf.random.normal((1, IM_SIZE, IM_SIZE, 3)),
+            tf.random.normal((1, 468, 3))
+        ])
         optimizerG = mixed_precision.LossScaleOptimizer(optimizers.RMSprop(LR))
         optimizerD = mixed_precision.LossScaleOptimizer(optimizers.RMSprop(LR))
         # lpips = tf.keras.models.load_model(LPIPS_PATH)
@@ -138,73 +138,70 @@ def main(args):
                                          max_to_keep=3)
     if manager.latest_checkpoint and args.resume:
         checkpoint.restore(manager.latest_checkpoint)
-        current_iteration = checkpoint.step.numpy()
+        start_iter = checkpoint.step.numpy()
         print('Load ckpt from {} at step {}.'.format(manager.latest_checkpoint,
                                                      checkpoint.step.numpy()))
     else:
         print("Training from scratch.")
-        current_iteration = 0
+        start_iter = 0
 
     avg_param_G = modelG.get_weights()
     prog_bar = ProgressBar(TOTAL_ITERATIONS, checkpoint.step.numpy())
 
-    ## Train functions
+    # Train functions
     @tf.function()
     def train_d(real_images, meshes):
         noise = tf.random.normal((int(BATCH_SIZE / N_GPU), W_DIM),
                                  0,
                                  1,
                                  dtype=tf.float16)
-        fake_images = modelG(noise, meshes, training=True)
-
-        alpha = tf.random.uniform((int(BATCH_SIZE / N_GPU), 1, 1, 1),
-                                  0,
-                                  1,
-                                  dtype=tf.float16)
-        interpolates = (alpha * tf.cast(real_images, tf.float16)) + (
-            (1 - alpha) * fake_images)
+        fake_images = modelG([noise, meshes], training=True)
 
         with tf.GradientTape() as d_tape:
-            ## Real images
-            pred_dr = modelD(real_images, training=True)
-            mean_dr = tf.reduce_mean(pred_dr, axis=1)
+            # Real images
+            real_logits = modelD([real_images, meshes], training=True)
+            real_score = tf.reduce_sum(
+                tf.math.softplus(-real_logits)) * BATCH_SCALER
 
             # Fake images
-            pred_df = modelD(fake_images, training=True)
-            mean_df = tf.reduce_mean(pred_df, axis=1)
+            fake_logits = modelD([fake_images, meshes], training=True)
+            fake_score = tf.reduce_sum(
+                tf.math.softplus(fake_logits)) * BATCH_SCALER
 
             with tf.GradientTape() as gp_tape:
-                gp_tape.watch(interpolates)
-                pred = modelD(interpolates, training=True)
-                pred = tf.reduce_sum(tf.reduce_mean(pred,
-                                                    axis=1)) * BATCH_SCALER
+                gp_tape.watch(real_images)
+                real_loss = tf.reduce_sum(
+                    modelD([real_images, meshes], training=True))
 
-            grads = gp_tape.gradient(pred, interpolates)
-            norm = tf.sqrt(tf.reduce_sum(grads**2, axis=[1, 2, 3]))
-            gp = tf.reduce_sum((norm - 1.0)**2) * BATCH_SCALER * C_LAMBDA
+            grads = gp_tape.gradient(real_loss, real_images)
+            gp = tf.reduce_sum(tf.math.square(grads), axis=[1, 2, 3])
+            gp = tf.cast(
+                tf.reduce_sum(gp) * C_LAMBDA * BATCH_SCALER, tf.float16)
 
-            err = tf.reduce_sum(mean_df - mean_dr) * BATCH_SCALER + tf.cast(
-                gp, tf.float16)
+            loss_d = real_score + fake_score + gp
 
-            scaled_err = optimizerD.get_scaled_loss(err)
-        scaled_gradients = d_tape.gradient(scaled_err,
+            scaled_loss = optimizerD.get_scaled_loss(loss_d)
+        scaled_gradients = d_tape.gradient(scaled_loss,
                                            modelD.trainable_variables)
         gradients = optimizerD.get_unscaled_gradients(scaled_gradients)
         optimizerD.apply_gradients(zip(gradients, modelD.trainable_variables))
 
-        return tf.reduce_sum(mean_dr) * BATCH_SCALER, tf.reduce_sum(
-            mean_df) * BATCH_SCALER, err, gp
+        return real_score, fake_score, loss_d, gp
 
     def distributed_train_d(real_images, meshes):
-        err_dr, err_df, loss_d, gradient_penalty = strategy.run(
+        real_score, fake_score, loss_d, gradient_penalty = strategy.run(
             train_d, args=(real_images, meshes))
-        err_dr = strategy.reduce(tf.distribute.ReduceOp.SUM, err_dr, axis=None)
-        err_df = strategy.reduce(tf.distribute.ReduceOp.SUM, err_df, axis=None)
+        real_score = strategy.reduce(tf.distribute.ReduceOp.SUM,
+                                     real_score,
+                                     axis=None)
+        fake_score = strategy.reduce(tf.distribute.ReduceOp.SUM,
+                                     fake_score,
+                                     axis=None)
         loss_d = strategy.reduce(tf.distribute.ReduceOp.SUM, loss_d, axis=None)
         gradient_penalty = strategy.reduce(tf.distribute.ReduceOp.SUM,
                                            gradient_penalty,
                                            axis=None)
-        return err_dr, err_df, loss_d, gradient_penalty
+        return real_score, fake_score, loss_d, gradient_penalty
 
     @tf.function()
     def train_g(meshes):
@@ -212,63 +209,48 @@ def main(args):
                                  0,
                                  1,
                                  dtype=tf.float16)
-        fake_images = modelG(noise, meshes, training=True)
-        pred_meshes = tf.py_function(imgs_to_landmarks, [fake_images],
-                                     tf.float16)
 
         with tf.GradientTape() as g_tape:
-            fake_images = modelG(noise, meshes, training=True)
+            fake_images = modelG([noise, meshes], training=True)
 
-            pred_g = modelD(fake_images, training=True)
-            mean_g = tf.reduce_mean(pred_g, axis=1)
+            logits = modelD([fake_images, meshes], training=True)
+            loss_g = tf.reduce_sum(tf.math.softplus(-logits)) * BATCH_SCALER
 
-            mse_mesh = tf.reduce_mean(
-                tf.square(tf.cast(meshes, tf.float16) - pred_meshes),
-                axis=[1, 2]) * C_LAMBDA
-
-            err_g = tf.reduce_sum(tf.cast(mse_mesh, tf.float16) -
-                                  mean_g) * BATCH_SCALER
-
-            scaled_err = optimizerG.get_scaled_loss(err_g)
-        scaled_gradients = g_tape.gradient(scaled_err,
+            scaled_loss = optimizerG.get_scaled_loss(loss_g)
+        scaled_gradients = g_tape.gradient(scaled_loss,
                                            modelG.trainable_variables)
         gradients = optimizerG.get_unscaled_gradients(scaled_gradients)
         optimizerG.apply_gradients(zip(gradients, modelG.trainable_variables))
 
-        return -tf.reduce_sum(mean_g) * BATCH_SCALER, tf.reduce_sum(
-            mse_mesh) * BATCH_SCALER, err_g
+        return loss_g
 
     def distributed_train_g(meshes):
-        pred_g, mse_mesh, loss_g = strategy.run(train_g, args=(meshes, ))
+        loss_g = strategy.run(train_g, args=(meshes, ))
         loss_g = strategy.reduce(tf.distribute.ReduceOp.SUM, loss_g, axis=None)
-        pred_g = strategy.reduce(tf.distribute.ReduceOp.SUM, pred_g, axis=None)
-        mse_mesh = strategy.reduce(tf.distribute.ReduceOp.SUM,
-                                   mse_mesh,
-                                   axis=None)
-        return pred_g, mse_mesh, loss_g
+        return loss_g
 
     ## Training loop
     fixed_noise = tf.random.normal((8, W_DIM), 0, 1, seed=42)
-    for iteration in range(current_iteration, TOTAL_ITERATIONS):
+    for iteration in range(start_iter, TOTAL_ITERATIONS):
         checkpoint.step.assign_add(1)
         cur_step = checkpoint.step.numpy()
         update_D, update_G = 0, 0
 
         # Run one step of the model.
         real_images, meshes = next(itds)
-        err_dr, err_df, loss_d, gradient_penalty = distributed_train_d(
+        real_score, fake_score, loss_d, gradient_penalty = distributed_train_d(
             real_images, meshes)
 
-        if iteration == current_iteration:
+        if iteration == start_iter:
             tf.summary.trace_on(graph=True)
-            pred_g, mse_mesh, loss_g = distributed_train_g(meshes)
+            loss_g = distributed_train_g(meshes)
             with summary_writer_1.as_default():
                 tf.summary.trace_export(name='Graph', step=0)
         else:
-            pred_g, mse_mesh, loss_g = distributed_train_g(meshes)
+            loss_g = distributed_train_g(meshes)
 
         # Update current and previous loss
-        if iteration == current_iteration:
+        if iteration == start_iter:
             ldp, lgp = loss_d, loss_g
             ldc, lgc = loss_d, loss_g
         else:
@@ -281,124 +263,36 @@ def main(args):
             # Run another step of D or G based on loss change ratio
             if rd > 2 * rg:
                 real_images, meshes = next(itds)
-                err_dr, err_df, loss_d, gradient_penalty = distributed_train_d(
+                real_score, fake_score, loss_d, gradient_penalty = distributed_train_d(
                     real_images, meshes)
                 update_D += 1
                 ldc = loss_d
             else:
-                pred_g, mse_mesh, loss_g = distributed_train_g(meshes)
+                loss_g = distributed_train_g(meshes)
                 update_G += 1
                 lgc = loss_g
 
             # Update previous loss
             lgp, ldp = lgc, ldc
 
-        with summary_writer_1.as_default():
-            tf.summary.scalar('Pred/Pred_Dr', err_dr, step=cur_step)
-            tf.summary.scalar('Pred/Pred_Df', err_df, step=cur_step)
-            tf.summary.scalar('Pred/Pred_G', pred_g, step=cur_step)
-
-            tf.summary.scalar('Loss/Loss_G', loss_g, step=cur_step)
-            tf.summary.scalar('Loss/Loss_D', loss_d, step=cur_step)
-            tf.summary.scalar('Loss/Loss_GP', gradient_penalty, step=cur_step)
-            tf.summary.scalar('Loss/Loss_MSE', mse_mesh, step=cur_step)
-
-            tf.summary.scalar('Misc/Balance',
-                              update_D - update_G,
-                              step=cur_step)
-
-            # Combined
-            tf.summary.scalar('Loss/Loss', loss_d, step=cur_step)
-            tf.summary.scalar('Pred/Pred_D', err_dr, step=cur_step)
-
-            # for i, layer in enumerate(modelG.layers):
-
-            #     if 'mapping' ==  layer.name:
-            #         for l in layer.dense_layers:
-            #             tf.summary.histogram(f'Mapping/{layer.name}/{l.name}/weight', l.w, step=cur_step)
-            #         for l in layer.bias_act_layers:
-            #             tf.summary.histogram(f'Mapping/{layer.name}/{l.name}/bias', l.b, step=cur_step)
-
-            #     if 'const_layer' == layer.name:
-            #         tf.summary.histogram(f'Init/{layer.name}/const', layer.const, step=cur_step)
-
-            #     if 'epilogue' in layer.name:
-            #         tf.summary.histogram(f'Epilogue/{layer.name}/inject_noise/weight', layer.inject_noise.w, step=cur_step)
-            #         tf.summary.histogram(f'Epilogue/{layer.name}/adain/scale_weight', layer.adain.style_scale_transform_dense.w, step=cur_step)
-            #         tf.summary.histogram(f'Epilogue/{layer.name}/adain/scale_bias', layer.adain.style_scale_transform_bias.b, step=cur_step)
-            #         tf.summary.histogram(f'Epilogue/{layer.name}/adain/shift_weight', layer.adain.style_shift_transform_dense.w, step=cur_step)
-            #         tf.summary.histogram(f'Epilogue/{layer.name}/adain/shift_bias', layer.adain.style_shift_transform_bias.b, step=cur_step)
-
-            # for g, v in zip(gradientsG, modelG.layers):
-            #     tf.summary.histogram("GradientG/{}/grad_histogram".format(v.name), g, step=cur_step)
-            #     tf.summary.scalar("GradientG/{}/grad/sparsity".format(v.name), tf.reduce_sum(g), step=cur_step)
-
-        with summary_writer_2.as_default():
-            tf.summary.scalar('Loss/Loss', loss_g, step=cur_step)
-            tf.summary.scalar('Pred/Pred_D', err_df, step=cur_step)
+        plot_to_tensorboard(summary_writer_1, summary_writer_2, cur_step,
+                            real_score, fake_score, loss_d, loss_g,
+                            update_D - update_G, gradient_penalty, modelG)
 
         prog_bar.update(
             "Pred Dr: {:>9.5f}, Pred Df: {:>9.5f}, Pred G: {:>9.5f}".format(
-                tf.cast(err_dr, 'float32'), tf.cast(err_df, 'float32'),
-                tf.cast(pred_g, 'float32')))
+                tf.cast(real_score, 'float32'), tf.cast(fake_score, 'float32'),
+                tf.cast(-loss_g, 'float32')))
 
         for i, (w, avg_w) in enumerate(zip(modelG.get_weights(), avg_param_G)):
             avg_param_G[i] = avg_w * 0.999 + 0.001 * w
 
-        ## Save image
-        if cur_step % 1000 == 0:
-            real_images, meshes = next(itds)
-            real_images = strategy.gather(real_images, 0)
-            meshes = strategy.gather(meshes, 0)
+        images_to_tensorboard(summary_writer_1, cur_step, fixed_noise,
+                              real_images, meshes, modelG, avg_param_G,
+                              IMAGE_FOLDER)
 
-            model_pred_fnoise = modelG(fixed_noise, meshes)
-
-            backup_para = modelG.get_weights()
-            modelG.set_weights(avg_param_G)
-
-            avg_model_pred_fnoise = modelG(fixed_noise, meshes)
-            modelG.set_weights(backup_para)
-
-            all_imgs = tf.concat([
-                tf.image.resize(real_images, (128, 128)),
-                tf.image.resize(model_pred_fnoise, (128, 128)),
-                tf.image.resize(avg_model_pred_fnoise, (128, 128))
-            ],
-                                 axis=0)
-
-            grid_all = imgrid((all_imgs + 1) * 0.5, 8)
-            grid_pred = imgrid((avg_model_pred_fnoise + 1) * 0.5, 4)
-
-            kutils.save_img(IMAGE_FOLDER + '/%06d_all.jpg' % cur_step,
-                            grid_all)
-            kutils.save_img(IMAGE_FOLDER + '/%06d_fix.jpg' % cur_step,
-                            grid_pred)
-            with summary_writer_1.as_default():
-                tf.summary.image("All images",
-                                 tf.expand_dims(grid_all, 0),
-                                 step=cur_step)
-                tf.summary.image("Fixed noise",
-                                 tf.expand_dims(grid_pred, 0),
-                                 step=cur_step)
-        elif cur_step % 500 == 0:
-            backup_para = modelG.get_weights()
-            modelG.set_weights(avg_param_G)
-            avg_model_pred_fnoise = modelG(fixed_noise, meshes)
-            grid_pred = imgrid((avg_model_pred_fnoise + 1) * 0.5, 4)
-            kutils.save_img(IMAGE_FOLDER + '/%06d_fix.jpg' % cur_step,
-                            grid_pred)
-            modelG.set_weights(backup_para)
-            with summary_writer_1.as_default():
-                tf.summary.image("Fixed noise",
-                                 tf.expand_dims(grid_pred, 0),
-                                 step=cur_step)
-
-        if cur_step % 5000 == 0 or cur_step == TOTAL_ITERATIONS:
-            backup_para = modelG.get_weights()
-            modelG.set_weights(avg_param_G)
-            manager.save()
-            tf.saved_model.save(modelG, MODEL_FOLDER + '/saved_model/')
-            modelG.set_weights(backup_para)
+        save_weights(modelG, avg_param_G, cur_step, TOTAL_ITERATIONS, manager,
+                     MODEL_FOLDER)
 
 
 if __name__ == "__main__":

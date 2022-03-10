@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_addons as tfa
 from keras.layers import Conv2D
-from tensorflow.keras import Model, layers
+from tensorflow.keras import Input, Model, layers
 from tensorflow.keras.utils import get_custom_objects
 from tensorflow.nn import depth_to_space
 from tensorflow_addons.layers import SpectralNormalization
@@ -92,44 +92,6 @@ class BiasAct(layers.Layer):
         return config
 
 
-class MappingTFDense(layers.Layer):
-
-    def __init__(self, n_mapping, w_dim=256, **kwargs):
-        super(MappingTFDense, self).__init__(**kwargs)
-        self.w_dim = w_dim
-        self.n_mapping = n_mapping
-
-        self.normalize = tf.keras.layers.Lambda(lambda x: x * tf.math.rsqrt(
-            tf.reduce_mean(tf.square(x), axis=-1, keepdims=True) + 1e-8))
-
-        self.dense_layers = list()
-        for _ in range(self.n_mapping):
-            self.dense_layers.append(
-                layers.Dense(w_dim, activation=tf.nn.leaky_relu))
-
-    def call(self, inputs):
-        x = inputs
-
-        # normalize inputs
-        x = self.normalize(x)
-
-        # apply mapping blocks
-        for dense in self.dense_layers:
-            x = dense(x)
-
-            # x = InstanceNormalization(-1)(x)
-
-        return x
-
-    def get_config(self):
-        config = super(MappingTFDense, self).get_config()
-        config.update({
-            'w_dim': self.w_dim,
-            'n_mapping': self.n_mapping,
-        })
-        return config
-
-
 class Mapping(layers.Layer):
 
     def __init__(self, n_mapping, w_dim=256, **kwargs):
@@ -160,7 +122,7 @@ class Mapping(layers.Layer):
                                 lrmul=self.lrmul,
                                 name='mesh_dense')
         self.mesh_bias = BiasAct(lrmul=self.lrmul,
-                                 act='linear',
+                                 act='lrelu',
                                  name='mesh_bias')
         self.labels_embedding = LabelEmbedding(embed_dim=self.w_dim,
                                                name='labels_embedding')
@@ -168,12 +130,12 @@ class Mapping(layers.Layer):
                              gain=self.gain,
                              lrmul=self.lrmul,
                              name='y_dense')
-        self.y_bias = BiasAct(lrmul=self.lrmul, act='linear', name='y_bias')
+        self.y_bias = BiasAct(lrmul=self.lrmul, act='lrelu', name='y_bias')
 
     def call(self, x, y, training=None, mask=None):
-        # y = self.y_dense(y)
-        # y = self.y_bias(y)
-        y = self.labels_embedding(y)
+        y = self.y_dense(y)
+        y = self.y_bias(y)
+        # y = self.labels_embedding(y)
 
         # normalize inputs
         x = self.normalize(x)
@@ -184,8 +146,8 @@ class Mapping(layers.Layer):
             x = dense(x)
             x = apply_bias_act(x)
 
-        x = tf.concat([x, y], axis=-1)
-        x = InstanceNormalization(axis=-1)(x)
+        x = tf.concat([x, y], axis=1)
+        x = InstanceNormalization(axis=1)(x)
 
         return x
 
@@ -236,11 +198,11 @@ class AdaIN(layers.Layer):
         self.style_scale_transform_dense = Dense(self.channels,
                                                  gain=np.sqrt(2),
                                                  lrmul=0.01)
-        self.style_scale_transform_bias = BiasAct(lrmul=0.01, act='linear')
+        self.style_scale_transform_bias = BiasAct(lrmul=0.01, act='lrelu')
         self.style_shift_transform_dense = Dense(self.channels,
                                                  gain=np.sqrt(2),
                                                  lrmul=0.01)
-        self.style_shift_transform_bias = BiasAct(lrmul=0.01, act='linear')
+        self.style_shift_transform_bias = BiasAct(lrmul=0.01, act='lrelu')
 
     def call(self, x, w):
         normalized_x = self.instance_norm(x)
@@ -705,10 +667,11 @@ class SimpleDecoder(layers.Layer):
 
 class Discriminator(Model):
 
-    def __init__(self, factor=64, im_size=256):
+    def __init__(self, w_dim=0, factor=64, im_size=256):
         super(Discriminator, self).__init__()
         self.im_size = im_size
         self.factor = factor
+        self.w_dim = w_dim
         self.f_channels_multi = {
             4: 16,
             8: 16,
@@ -777,11 +740,24 @@ class Discriminator(Model):
             DownBlockComp(self.f_channels[8]),
             SpectralNormalization(layers.Conv2D(1, 4, 1, use_bias=False)),
             layers.Flatten(),
-            layers.Dense(1)
+            layers.Dense(max(self.w_dim, 1))
         ])
 
+        if self.w_dim > 0:
+            self.y_dense = Dense(w_dim,
+                                 gain=np.sqrt(2),
+                                 lrmul=0.01,
+                                 name='y_dense')
+            self.y_bias = BiasAct(lrmul=0.01, act='lrelu', name='y_bias')
+
     def call(self, inputs):
-        feat_2 = self.feat_2(inputs)
+        x, y = inputs
+
+        if self.w_dim > 0:
+            y = self.y_dense(y)
+            y = self.y_bias(y)
+
+        feat_2 = self.feat_2(x)
         feat_4 = self.feat_4(feat_2)
         feat_8 = self.feat_8(feat_4)
         feat_16 = self.feat_16(feat_8)
@@ -791,16 +767,26 @@ class Discriminator(Model):
         feat_last = self.feat_last(se_block_32)
         se_block_last = self.se_block_last(feat_8, feat_last)
         output = self.out(se_block_last)
+
+        if self.w_dim > 0:
+            output = tf.reduce_sum(output * y, axis=1, keepdims=True)
         return output
 
+    def summary(self):
+        x = Input(shape=(self.im_size, self.im_size, 3))
+        y = Input(shape=(self.w_dim, ))
+        model = Model(inputs=[x, y], outputs=self.call([x, y]))
+        return model.summary()
+
     def compute_output_shape(self, input_shape):
-        return (None, 1)
+        return (input_shape[0][0], max(self.w_dim, 1))
 
     def get_config(self):
         config = super(Discriminator, self).get_config()
         config.update({
             'im_size': self.im_size,
             'factor': self.factor,
+            'w_dim': self.w_dim
         })
         return config
 
@@ -816,6 +802,7 @@ class Generator(Model):
         super(Generator, self).__init__(**kwargs)
         assert im_size in [256, 512,
                            1024], 'im_size must be in [256, 512, 1024]'
+        self.w_dim = w_dim
         self.im_size = im_size
         self.image_channels = image_channels
         self.factor = factor
@@ -860,7 +847,8 @@ class Generator(Model):
             layers.Conv2D(self.image_channels, 3, 1, 'same', use_bias=False))
         self.act = layers.Activation('tanh')
 
-    def call(self, x, y):
+    def call(self, inputs):
+        x, y = inputs
         w = self.mapping(x, y)
         const = self.const(w)
         feat_8 = self.feat_8(const, w)
@@ -890,6 +878,12 @@ class Generator(Model):
 
         return output
 
+    def summary(self):
+        x = Input(shape=(self.im_size, self.im_size, self.image_channels))
+        y = Input(shape=(self.w_dim, ))
+        model = Model(inputs=[x, y], outputs=self.call([x, y]))
+        return model.summary()
+
     def compute_output_shape(self, input_shape):
         return (None, self.im_size, self.im_size, self.image_channels)
 
@@ -905,12 +899,20 @@ class Generator(Model):
 
 
 if __name__ == "__main__":
-    disc = Discriminator()
-    disc.build((None, 256, 256, 3))
+    W_DIM = 256
+    D_FACTOR = 64
+    G_FACTOR = 64
+    IM_SIZE = 256
+
+    disc = Discriminator(w_dim=W_DIM, factor=D_FACTOR, im_size=IM_SIZE)
+    disc([
+        tf.random.normal((1, IM_SIZE, IM_SIZE, 3)),
+        tf.random.normal((1, 468, 3))
+    ])
     disc.summary()
 
-    gen = Generator()
-    gen.build((None, 256))
+    gen = Generator(w_dim=W_DIM, factor=G_FACTOR, im_size=IM_SIZE)
+    gen([tf.random.normal((1, W_DIM)), tf.random.normal((1, 468, 3))])
     gen.summary()
 
     gen.save_weights('./checkpoints/')
