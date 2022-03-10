@@ -850,7 +850,7 @@ class Generator(Model):
     def call(self, inputs):
         x, y = inputs
         w = self.mapping(x, y)
-        const = self.const(w)
+        const = self.const(x)
         feat_8 = self.feat_8(const, w)
         feat_16 = self.feat_16(feat_8, w)
         feat_32 = self.feat_32(feat_16, w)
